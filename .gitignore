@@ -6,4 +6,7 @@
 .html
 MAESPA/
 compiled/
+Maeserr.dat
+*.mod
+maespa.out
 
