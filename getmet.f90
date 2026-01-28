@@ -836,10 +836,10 @@ SUBROUTINE CALCTHRLY(TMAX,TMIN,DAYL,TAIR)
 ! Calculate a daily variation in temperature from max & min temperatures.
 ! Temp varies linearly between sunset & sunrise, and sinusoidally during the day.
 ! INPUTS:
-! TMIN, TMAX - minimum and maximum daily temperatures, 캜
+! TMIN, TMAX - minimum and maximum daily temperatures, 째C
 ! DAYL - daylength, hours
 ! OUTPUTS:
-! TAIR - array of hourly air temperatures, 캜
+! TAIR - array of hourly air temperatures, 째C
 !**********************************************************************
 
     USE maestcom
@@ -870,9 +870,9 @@ SUBROUTINE CALCTSOIL(TAIR,TSOIL)
 ! Calculate soil temperatures.
 ! Set equal to average daily air temperature.
 ! INPUTS:
-! TAIR - array of hourly air temperatures, 캜
+! TAIR - array of hourly air temperatures, 째C
 ! OUTPUTS:
-! TSOIL - array of hourly soil temperatures, 캜
+! TSOIL - array of hourly soil temperatures, 째C
 !**********************************************************************
 
     USE maestcom
@@ -954,8 +954,8 @@ END SUBROUTINE ASSIGNRAIN
 ! Calculate hourly relative humidity from air temperature and minimum
 ! daily temperature (assumed to be the dewpoint).
 ! INPUTS:
-! TMIN - daily minimum temperature, 캜
-! TAIR - array of hourly air temperatures, 캜
+! TMIN - daily minimum temperature, 째C
+! TAIR - array of hourly air temperatures, 째C
 ! OUTPUTS:
 ! RH - array of hourly relative humidity, fraction
 !**********************************************************************
