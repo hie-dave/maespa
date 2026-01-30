@@ -4,35 +4,46 @@
 ##
 
 PROG =	maespa.out
+WG_PROG = daily2hourly
 
-SRCS =	default_conditions.f90 switches.f90 getmet.f90 maindeclarations.f90 \
-        inout.f90 maespa.f90 maestcom.f90 metcom.f90 physiol.f90 \
-        radn.f90 unstor.f90 utils.f90 watbal.f90
-
+SRCS=$(wildcard *.f90)
 OBJS =	default_conditions.o switches.o getmet.o maindeclarations.o inout.o \
         maespa.o maestcom.o metcom.o physiol.o radn.o \
 	    unstor.o utils.o watbal.o
 
-LIBS =	
-
-INCLS = 
+# Objects for the standalone converter (avoid linking maespa.o)
+WG_OBJS = daily2hourly.o weathergen_options.o weathergen_netcdf.o weathergen.o \
+		  getmet.o maestcom.o metcom.o switches.o radn.o utils.o
 
 F90 = gfortran
 
-FFLAGS = -g -fbounds-check -finit-local-zero -Wuninitialized -ftrapv -ffree-form -ffree-line-length-none -O3
+RM ?= rm -f
 
-all: $(PROG)
+INCLS = -I/usr/include
+FFLAGS = -g -Wall -fbounds-check -finit-local-zero -Wuninitialized -ftrapv -ffree-form -ffree-line-length-none -O3
+
+# CDI for CF-time and NetCDF I/O (future integration)
+FFLAGS += $(shell pkg-config --cflags cdi_f2003 2>/dev/null)
+LIBS =	$(shell pkg-config --libs cdi_f2003 2>/dev/null)
+
+.PHONY: all clean
+.DEFAULT_GOAL := all
+
+all: $(PROG) $(WG_PROG)
 
 $(PROG): $(OBJS)
-	$(F90) $(FFLAGS) -o $@ $(OBJS) $(LIBS) $(INCLS)
+	$(F90) $(FFLAGS) $(OBJS) $(LIBS) -o $@
+
+$(WG_PROG): $(WG_OBJS)
+	$(F90) $(FFLAGS) $(WG_OBJS) $(LIBS) -o $@
 
 clean:
-	rm -f $(PROG) $(OBJS) *.mod
+	$(RM) $(PROG) $(WG_PROG) $(OBJS) $(WG_OBJS) *.mod
 
 .SUFFIXES: $(SUFFIXES) .f90
 
-.f90.o:
-	$(F90) $(FFLAGS) -c $<
+%.o: %.f90
+	$(F90) $(FFLAGS) $(INCLS) -c $< -o $@
 
 default_conditions.o: switches.o
 getmet.o: maestcom.o metcom.o switches.o
@@ -40,7 +51,12 @@ maindeclarations.o: maestcom.o
 inout.o: maestcom.o switches.o
 maespa.o: maestcom.o metcom.o switches.o maindeclarations.o
 physiol.o: maestcom.o metcom.o
-radn2.o: maestcom.o
+radn.o: maestcom.o
 unstor.o: maestcom.o
 utils.o: maestcom.o
 watbal.o: maestcom.o metcom.o
+
+# Ensure module build order for the standalone converter
+daily2hourly.o: weathergen_options.o weathergen.o weathergen_netcdf.o
+weathergen.o: maestcom.o
+weathergen_netcdf.o: weathergen_options.o weathergen.o
