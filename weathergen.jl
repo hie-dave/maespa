@@ -4,6 +4,7 @@ using ArgParse
 using Logging
 using NCDatasets
 using Dates
+using DataStructures
 
 ################################################################################
 # Constants
@@ -17,6 +18,18 @@ const STD_LON = "longitude"
 
 # Standard name of time axes (as per CF spec).
 const STD_TIME = "time"
+
+# Standard name attribute name (as per CF spec).
+const ATTR_STD_NAME = "standard_name"
+
+# Units attribute name (as per CF spec).
+const ATTR_UNITS = "units"
+
+# Long name attribute name (as per CF spec).
+const ATTR_LONG_NAME = "long_name"
+
+# Number of timesteps per day.
+const DAY_LENGTH = 24
 
 struct Options
     seed::Int
@@ -41,6 +54,7 @@ struct Options
 end
 
 struct DimensionIndices
+    var::NCDatasets.CFVariable
     index_lon::Int
     index_lat::Int
     index_time::Int
@@ -160,42 +174,116 @@ function wg_seed(seed::Int)::Cint
     return ccall((:wg_seed, libwg), Cint, (Int64,), Int64(seed))
 end
 
-# One-day generation wrapper (in-place outputs)
+"""Generate hourly meteorology for a single day.
+
+This is a thin wrapper over the Fortran `wg_generate_day` C ABI.
+All scalars are passed by value. Output buffers must be preallocated.
+"""
+function wg_generate_day(
+    idate::Int,
+    alat::Real,
+    tmin::Real,
+    tmax::Real,
+    sw_mean_wm2::Real,
+    precip_mm::Real,
+    wind_ms::Real,
+    press_pa::Real,
+    nhrs::Int,
+    tair::Ptr{Cfloat},
+    tsoil::Ptr{Cfloat},
+    rh::Ptr{Cfloat},
+    vpd::Ptr{Cfloat},
+    vmfd::Ptr{Cfloat},
+    radabv::Ptr{Cfloat},
+    fbeam::Ptr{Cfloat},
+    ppt::Ptr{Cfloat},
+    winda::Ptr{Cfloat},
+    press::Ptr{Cfloat},
+)::Cint
+    return ccall(
+        (:wg_generate_day, libwg),
+        Cint,
+        (Cint, Cfloat, Cfloat, Cfloat, Cfloat, Cfloat, Cfloat, Cfloat, Cint,
+            Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat},
+            Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}),
+        Cint(idate),
+        Cfloat(alat),
+        Cfloat(tmin),
+        Cfloat(tmax),
+        Cfloat(sw_mean_wm2),
+        Cfloat(precip_mm),
+        Cfloat(wind_ms),
+        Cfloat(press_pa),
+        Cint(nhrs),
+        tair,
+        tsoil,
+        rh,
+        vpd,
+        vmfd,
+        radabv,
+        fbeam,
+        ppt,
+        winda,
+        press,
+    )
+end
+
+"""Convenience wrapper for `wg_generate_day` using Julia arrays.
+
+Arrays are passed to the underlying Fortran code as pointers.
+"""
 function wg_generate_day!(;
     idate::Int,
-    alat::Float32, dayl::Float32, dec::Float32,
-    deltat::NTuple{12,Float32},   # or use Vector{Float32} length 12
-    tmin::Float32, tmax::Float32, sw_mean_wm2::Float32, precip_mm::Float32,
-    wind_ms::Float32, press_pa::Float32, ca_umol_mol::Float32,
-    tair::Vector{Float32}, tsoil::Vector{Float32}, rh::Vector{Float32},
-    vpd::Vector{Float32}, vmfd::Vector{Float32},
-    radabv::Vector{Float32}, fbeam::Vector{Float32},
-    ppt::Vector{Float32}, winda::Vector{Float32},
-    press::Vector{Float32}, ca::Vector{Float32},
+    alat::Float32,
+    tmin::Float32,
+    tmax::Float32,
+    sw_mean_wm2::Float32,
+    precip_mm::Float32,
+    wind_ms::Float32,
+    press_pa::Float32,
+    tair::Vector{Float32},
+    tsoil::Vector{Float32},
+    rh::Vector{Float32},
+    vpd::Vector{Float32},
+    vmfd::Vector{Float32},
+    radabv::Vector{Float32},
+    fbeam::Vector{Float32},
+    ppt::Vector{Float32},
+    winda::Vector{Float32},
+    press::Vector{Float32},
 )::Cint
-    nhrs = Cint(length(tair))
+    nhrs::Int = length(tair)
     @assert length(tsoil) == nhrs
-    @assert length(rh)    == nhrs
-    @assert length(vpd)   == nhrs
-    @assert length(vmfd)  == nhrs
-    @assert length(ppt)   == nhrs
+    @assert length(rh) == nhrs
+    @assert length(vpd) == nhrs
+    @assert length(vmfd) == nhrs
+    @assert length(ppt) == nhrs
     @assert length(winda) == nhrs
     @assert length(press) == nhrs
-    @assert length(ca)    == nhrs
-    @assert length(radabv) == nhrs*3
-    @assert length(fbeam)  == nhrs*3
+    @assert length(radabv) == nhrs * 3
+    @assert length(fbeam) == nhrs * 3
 
-    return ccall((:wg_generate_day, libwg), Cint,
-        (Cint, Cfloat, Cfloat, Cfloat, Ptr{Cfloat}, Cfloat, Cfloat, Cfloat, Cfloat,
-         Cfloat, Cfloat, Cfloat, Cint,
-         Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat},
-         Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}),
-        Cint(idate), Cfloat(alat), Cfloat(dayl), Cfloat(dec),
-        Base.unsafe_convert(Ptr{Cfloat}, pointer_from_objref(Ref{NTuple{12,Cfloat}}(Cfloat.(deltat)))),
-        Cfloat(tmin), Cfloat(tmax), Cfloat(sw_mean_wm2), Cfloat(precip_mm),
-        Cfloat(wind_ms), Cfloat(press_pa), Cfloat(ca_umol_mol), nhrs,
-        pointer(tair), pointer(tsoil), pointer(rh), pointer(vpd), pointer(vmfd),
-        pointer(radabv), pointer(fbeam), pointer(ppt), pointer(winda), pointer(press), pointer(ca))
+    return wg_generate_day(
+        idate,
+        alat,
+        tmin,
+        tmax,
+        sw_mean_wm2,
+        precip_mm,
+        wind_ms,
+        press_pa,
+        nhrs,
+        pointer(tair),
+        pointer(tsoil),
+        pointer(rh),
+        pointer(vpd),
+        pointer(vmfd),
+        pointer(radabv),
+        pointer(fbeam),
+        pointer(ppt),
+        pointer(winda),
+        pointer(press),
+    )
 end
 
 function unique_by_path(ds::AbstractVector{<:NCDataset})::Vector{<:NCDataset}
@@ -277,13 +365,17 @@ function validate_spatial_axes(datasets::AbstractVector{<:NCDataset}, axis::Stri
 end
 
 function validate_variable(nc::NCDataset, var::NCDatasets.CFVariable, units::String)::DimensionIndices
-    if get(var, "units", "") != units
-        error("Variable $(var.name) has units $(get(var, "units", "")) but expected $units")
+    if !haskey(var.attrib, ATTR_UNITS)
+        error("Variable $(name(var)) has no units attribute")
+    end
+
+    if var.attrib[ATTR_UNITS] != units
+        error("Variable $(name(var)) has units $(var.attrib[ATTR_UNITS]) but expected $units")
     end
 
     # Ensure that the variable is 3-dimensional.
     if ndims(var) != 3
-        error("Variable $(var.name) has $(ndims(var)) dimensions but expected 3")
+        error("Variable $(name(var)) has $(ndims(var)) dimensions but expected 3")
     end
 
     # Ensure that the three dimensions are latitude, longitude, and time.
@@ -312,16 +404,16 @@ function validate_variable(nc::NCDataset, var::NCDatasets.CFVariable, units::Str
     index_time = findfirst(==(dim_time), dimnames(var))
 
     if index_lon < 0
-        error("Variable $(var.name) does not have dimension $dim_lon")
+        error("Variable $(name(var)) does not have dimension $dim_lon")
     end
     if index_lat < 0
-        error("Variable $(var.name) does not have dimension $dim_lat")
+        error("Variable $(name(var)) does not have dimension $dim_lat")
     end
     if index_time < 0
-        error("Variable $(var.name) does not have dimension $dim_time")
+        error("Variable $(name(var)) does not have dimension $dim_time")
     end
 
-    return DimensionIndices(index_lon, index_lat, index_time)
+    return DimensionIndices(var, index_lon, index_lat, index_time)
 end
 
 function validate_variable_from_name(nc::NCDataset, name::String, units::String)::DimensionIndices
@@ -335,6 +427,144 @@ end
 function validate_variable_from_std_name(nc::NCDataset, std_name::String, units::String)::DimensionIndices
     var = var_from_std_name(nc, std_name)
     return validate_variable(nc, var, units)
+end
+
+function read_variable(var::NCDatasets.CFVariable, idx::DimensionIndices, i::Int, j::Int)
+    hyperslab = selectdim(var, idx.index_lat, i)
+    hyperslab = selectdim(hyperslab, idx.index_lon, j)
+    data = hyperslab[:]
+
+    # Error if any data is missing.
+    if any(ismissing, data)
+        error("Missing data in variable $(name(var)) at gridcell ($i, $j)")
+    end
+
+    return data
+end
+
+"""Convert a `DateTime` to Maespa's `idate` (days since 1950-01-01).
+
+This matches the Fortran calendar math used by Maespa (Julian-style leap
+years: every 4 years, with no century exception), so `JDATE(idate)` returns
+the correct day-of-year.
+"""
+function date_to_idate(date::DateTime)
+    # Note: can't use Dates.value() because the underlying fortran code uses a
+    # Julian calendar, with leap days exactly every 4 years.
+
+    yearValue = year(date)
+    monthValue = month(date)
+    dayValue = day(date)
+
+    ifd = (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
+
+    dayOfYear = ifd[monthValue] + dayValue
+    isLeapYear = (4 * (yearValue ÷ 4) == yearValue)
+    if isLeapYear && monthValue >= 3
+        dayOfYear += 1
+    end
+
+    yearsSince1950 = yearValue - 1950
+    daysBeforeYear = 365 * yearsSince1950 + div(yearsSince1950 - 1, 4)
+
+    return daysBeforeYear + dayOfYear - 1
+end
+
+function write_outputs(out_file::String, name::String, data::Vector{Float32},
+                       ilat::Int, ilon::Int, indices::DimensionIndices)
+    NCDataset(out_file, "a") do nc
+        var = nc[name]
+
+        hyperslab = selectdim(var, indices.index_lat, ilat)
+        hyperslab = selectdim(hyperslab, indices.index_lon, ilon)
+        hyperslab[:] = data
+    end
+end
+
+const NcAttribContainer = Union{NCDataset, NCDatasets.CFVariable}
+function copy_attributes(in::NcAttribContainer, out::NcAttribContainer)
+    for attr in keys(in.attrib)
+        # Attributes starting with _ are for netcdf internal use only.
+        if attr[1] != '_'
+            out.attrib[attr] = in.attrib[attr]
+        end
+    end
+end
+
+function init_outfile(path::String, name::String, dims::Vector{String}, units::String, std_name::String, long_name::String)
+    NCDataset(path, "a") do nc_out
+        var = defVar(nc_out, name, Float32, dims)
+        var.attrib[ATTR_UNITS] = units
+        var.attrib[ATTR_STD_NAME] = std_name
+        var.attrib[ATTR_LONG_NAME] = long_name
+    end
+end
+
+function init_outfile(path::String, nc_in::NCDataset, out_var_name::String, in_var_name::String)
+    # Open the file and create the required output variable.
+    NCDataset(path, "a") do nc_out
+        # Get the input variable.
+        in_var = nc_in[in_var_name]
+
+        # Create the output variable.
+        # var = add_variable(nc_out, out_var_name, Float32, dimnames(in_var))
+        # defVar(nc_out, name(in_lon), in_lon[:], dimnames(in_lon))
+        var = defVar(nc_out, out_var_name, Float32, dimnames(in_var))
+        copy_attributes(in_var, var)
+    end
+end
+
+# Convenience function for when the output variable name is the same as the
+# input variable name.
+function init_outfile(path::String, nc_in::NCDataset, var_name::String)
+    init_outfile(path, nc_in, var_name, var_name)
+end
+
+function init_outfiles(opts::Options, nc_in::NCDataset)
+    paths = unique([opts.out_temp, opts.out_rs, opts.out_pr, opts.out_ps,
+                    opts.out_ws, opts.out_vpd])
+    for path in paths
+        # Create directory if it doesn't already exist.
+        dir = dirname(path)
+        if !isdir(dir)
+            mkdir(dir)
+        end
+
+        NCDataset(path, "c") do nc_out
+            # Copy all dimensions from the input file.
+            for dim in keys(nc_in.dim)
+                if dim != "time"
+                    size = nc_in.dim[dim]
+                    defDim(nc_out, dim, size)
+                end
+            end
+
+            # Copy all global attributes from the input file.
+            copy_attributes(nc_in, nc_out)
+
+            # Create and populate coordinate variables in output file.
+            in_lon = var_from_std_name(nc_in, STD_LON)
+            in_lat = var_from_std_name(nc_in, STD_LAT)
+            in_time = var_from_std_name(nc_in, STD_TIME)
+
+            out_lon = defVar(nc_out, name(in_lon), in_lon[:], dimnames(in_lon))
+            copy_attributes(in_lon, out_lon)
+
+            out_lat = defVar(nc_out, name(in_lat), in_lat[:], dimnames(in_lat))
+            copy_attributes(in_lat, out_lat)
+
+            # Construct hourly timeseries from each day in the input time
+            # variable.
+            times = in_time[:]
+            hours = [t + Hour(h) for t in times for h in 0:(DAY_LENGTH - 1)]
+            out_time = defVar(nc_out, name(in_time), hours, dimnames(in_time),
+                              attrib = OrderedDict(
+                ATTR_UNITS => in_time.attrib[ATTR_UNITS],
+                "calendar" => in_time.attrib["calendar"],
+            ))
+            copy_attributes(in_time, out_time)
+        end
+    end
 end
 
 function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset, rs::NCDataset, pr::NCDataset, ps::NCDataset, ws::NCDataset)
@@ -357,7 +587,119 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset, rs::NCDat
     # Iterate through gridcells. (All input files use the same grid.)
     var_lon = var_from_std_name(tmin, STD_LON)
     var_lat = var_from_std_name(tmin, STD_LAT)
-    var_time = get_time_variable(tmin)
+    var_time = var_from_std_name(tmin, STD_TIME)
+
+    lons = var_lon[:]
+    lats = var_lat[:]
+    times = var_time[:]
+
+    # Create output files with coordinate variables.
+    init_outfiles(opts, tmin)
+
+    # Initialise data variables in output files.
+    # path::String, nc_in::NCDataset, out_var_name::String, in_var_name::String
+    init_outfile(opts.out_rs, rs, name(idx_rs.var))
+    init_outfile(opts.out_pr, pr, name(idx_pr.var))
+    init_outfile(opts.out_ps, ps, name(idx_ps.var))
+    init_outfile(opts.out_ws, ws, name(idx_ws.var))
+
+    # Temperature can be created by copying metadata from tmin input file.
+    init_outfile(opts.out_temp, tmin, opts.out_name_temp, opts.name_tmin)
+    idx_temp = idx_tmin # same dimension order as tmin
+
+    # VPD must be created from scratch. We can use same dimension order as tmin
+    # input file.
+    init_outfile(opts.out_vpd, opts.out_name_vpd,
+                 [dimnames(tmin[opts.name_tmin])...],
+                 "kPa", "vapour_pressure_deficit", "Vapour pressure deficit")
+    idx_vpd = idx_tmin # same dimension order as tmin
+
+    # Iterate through gridcells. Generate climate one gridcell at a time.
+    for i in eachindex(lats)
+        for j in eachindex(lons)
+            lon = lons[j]
+            lat = lats[i]
+
+            @info "Processing gridcell $i, $j ($lon, $lat)"
+
+            # Read timeseries for this gridcell.
+            tmin_data = read_variable(idx_tmin.var, idx_tmin, i, j)
+            tmax_data = read_variable(idx_tmax.var, idx_tmax, i, j)
+            rs_data = read_variable(idx_rs.var, idx_rs, i, j)
+            pr_data = read_variable(idx_pr.var, idx_pr, i, j)
+            ps_data = read_variable(idx_ps.var, idx_ps, i, j)
+            ws_data = read_variable(idx_ws.var, idx_ws, i, j)
+
+            tair_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
+            vpd_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
+            rs_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
+            pr_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
+            ws_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
+            ps_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
+
+            # Define daily arrays for the outputs we don't care about. These
+            # will just be overwritten each day.
+            tsoil_out = Vector{Float32}(undef, DAY_LENGTH)
+            rh_out = Vector{Float32}(undef, DAY_LENGTH)
+            vmfd_out = Vector{Float32}(undef, DAY_LENGTH)
+            radabv_out = Vector{Float32}(undef, DAY_LENGTH * 3)
+            fbeam_out = Vector{Float32}(undef, DAY_LENGTH * 3)
+
+            # wg_generate_day() operates at the day level, so we need to iterate
+            # over the days in the input file.
+            for k in eachindex(times)
+                @debug "Generating climate for day: $(times[k])"
+
+                # idate: days since 1950
+                idate = date_to_idate(times[k])
+                # alat: latitude in radians
+                alat = deg2rad(lat)
+
+                # Compute offset into output arrays.
+                start = (k - 1) * DAY_LENGTH + 1
+
+                # Get pointers to today's data in the long output arrays.
+                GC.@preserve tair_out vpd_out rs_out pr_out ws_out ps_out begin
+
+                    tair_day = pointer(tair_out, start)
+                    vpd_day = pointer(vpd_out, start)
+                    rs_day = pointer(rs_out, start)
+                    pr_day = pointer(pr_out, start)
+                    ws_day = pointer(ws_out, start)
+                    ps_day = pointer(ps_out, start)
+
+                    tsoil_day = pointer(tsoil_out, 0)
+                    rh_day = pointer(rh_out, 0)
+                    vmfd_day = pointer(vmfd_out, 0)
+                    radabv_day = pointer(radabv_out, 0)
+                    fbeam_day = pointer(fbeam_out, 0)
+
+                    # Call the weather generator.
+                    wg_generate_day(idate, alat, tmin_data[k], tmax_data[k],
+                                    rs_data[k], pr_data[k], ws_data[k],
+                                    ps_data[k], DAY_LENGTH, tair_day,
+                                    tsoil_day, rh_day, vpd_day, vmfd_day,
+                                    radabv_day, fbeam_day, pr_day, ws_day,
+                                    ps_day)
+
+                    # rs output is the sum of the PAR and NIR components of
+                    # radabv_day. radabv is a 3-column matrix flattened to a
+                    # column-major buffer.
+                    for ihr in 1:DAY_LENGTH
+                        rs_out[ihr] = radabv_out[ihr] + radabv_out[ihr + DAY_LENGTH]
+                    end
+                end
+            end # iteration through times
+
+            # Write data for this gridcell to the output files.
+            write_outputs(opts.out_temp, opts.out_name_temp, tair_out, i, j, idx_temp)
+            write_outputs(opts.out_vpd, opts.out_name_vpd, vpd_out, i, j, idx_vpd)
+            write_outputs(opts.out_rs, name(idx_rs.var), rs_out, i, j, idx_rs)
+            write_outputs(opts.out_pr, name(idx_pr.var), pr_out, i, j, idx_pr)
+            write_outputs(opts.out_ps, name(idx_ps.var), ps_out, i, j, idx_ps)
+            write_outputs(opts.out_ws, name(idx_ws.var), ws_out, i, j, idx_ws)
+        end # iteration through lons
+    end # iteration through lats
 end
 
 function main(opts::Options)

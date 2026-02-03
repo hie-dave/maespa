@@ -58,12 +58,15 @@ watbal.o: maestcom.o metcom.o
 # Ensure module build order for the standalone converter
 weathergen.o: maestcom.o
 
+NC_FILE=data/silo/processed/CumberlandPlain.nc
+NC_OUT=data/silo/hourly/CumberlandPlain.nc
+
 run:
 	./weathergen.jl \
-		--file-tmin data/CumberlandPlain.nc --file-tmax data/CumberlandPlain.nc \
-		--file-rs data/CumberlandPlain.nc --file-pr data/CumberlandPlain.nc \
-		--file-ps data/CumberlandPlain.nc --file-ws data/CumberlandPlain.nc \
-		--out-temp output/CumberlandPlain_temp.nc --out-rs output/CumberlandPlain_rs.nc \
-		--out-pr output/CumberlandPlain_pr.nc --out-ps output/CumberlandPlain_ps.nc \
-		--out-ws output/CumberlandPlain_wind.nc --out-vpd output/CumberlandPlain_vpd.nc \
+		--file-tmin $(NC_FILE) --file-tmax $(NC_FILE) \
+		--file-rs $(NC_FILE) --file-pr $(NC_FILE) \
+		--file-ps $(NC_FILE) --file-ws $(NC_FILE) \
+		--out-temp $(NC_OUT) --out-rs $(NC_OUT) \
+		--out-pr $(NC_OUT) --out-ps $(NC_OUT) \
+		--out-ws $(NC_OUT) --out-vpd $(NC_OUT) \
 		--name-tmax tasmax --name-tmin tasmin --show-progress --verbosity 3

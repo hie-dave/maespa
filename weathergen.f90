@@ -71,30 +71,26 @@ CONTAINS
     END IF
   END SUBROUTINE wg_assignrain_det
 
-  SUBROUTINE wg_generate_day_internal(idate, alat, dayl, dec, deltat, &
+  SUBROUTINE wg_generate_day_internal(idate, alat, &
                               tmin, tmax, sw_mean_wm2, precip_mm, &
-                              wind_ms, press_pa, ca_umol_mol, &
+                              wind_ms, press_pa, &
                               tair, tsoil, rh, vpd, vmfd, &
-                              radabv, fbeam, ppt, winda, press, ca)
+                              radabv, fbeam, ppt, winda, press)
     ! Generate hourly series for a single day from daily inputs.
     ! Inputs
     INTEGER, INTENT(IN) :: idate          ! days-since-1950
     REAL,    INTENT(IN) :: alat           ! radians
-    REAL,    INTENT(IN) :: dayl           ! hours
-    REAL,    INTENT(IN) :: dec            ! radians
-    REAL,    INTENT(IN) :: deltat(12)     ! monthly T amplitude (for BRISTO)
     REAL,    INTENT(IN) :: tmin, tmax     ! deg C
     REAL,    INTENT(IN) :: sw_mean_wm2    ! W m-2 daily mean shortwave
     REAL,    INTENT(IN) :: precip_mm      ! mm/day
     REAL,    INTENT(IN) :: wind_ms        ! m s-1 (daily mean)
     REAL,    INTENT(IN) :: press_pa       ! Pa (daily mean)
-    REAL,    INTENT(IN) :: ca_umol_mol    ! umol mol-1 (daily mean)
     ! Outputs (length KHRS)
     REAL,    INTENT(OUT) :: tair(MAXHRS), tsoil(MAXHRS)
     REAL,    INTENT(OUT) :: rh(MAXHRS), vpd(MAXHRS), vmfd(MAXHRS)
     REAL,    INTENT(OUT) :: radabv(MAXHRS,3), fbeam(MAXHRS,3)
     REAL,    INTENT(OUT) :: ppt(MAXHRS), winda(MAXHRS)
-    REAL,    INTENT(OUT) :: press(MAXHRS), ca(MAXHRS)
+    REAL,    INTENT(OUT) :: press(MAXHRS)
 
     ! Externals from getmet.f90 and radn.f90
     EXTERNAL :: CALCTHRLY, CALCRH, RHTOVPD, VPDTOMFD
@@ -106,22 +102,21 @@ CONTAINS
     REAL :: fbm, radbm, raddf
     REAL :: zen(MAXHRS), az(MAXHRS), fsun(MAXHRS)
     REAL :: par_wm2_to_mj
-    REAL :: dec_loc, eqntim_loc, dayl_loc, sunset
+    REAL :: dec, eqntim_loc, dayl, sunset
 
     ! Compute solar geometry for this day at latitude alat
     idoy = JDATE(idate)
-    CALL SUN(idoy, alat, 0.0, dec_loc, eqntim_loc, dayl_loc, sunset)
-    CALL ZENAZ(alat, 0.0, 0.0, dec_loc, eqntim_loc, zen, az)
+    CALL SUN(idoy, alat, 0.0, dec, eqntim_loc, dayl, sunset)
+    CALL ZENAZ(alat, 0.0, 0.0, dec, eqntim_loc, zen, az)
 
-    ! Wind/pressure/CO2 constant across hours
+    ! Wind/pressure constant across hours
     DO ihr = 1, KHRS
       winda(ihr) = wind_ms
       press(ihr) = press_pa
-      ca(ihr)    = ca_umol_mol
     END DO
 
     ! Hourly air temperatures
-    CALL CALCTHRLY(tmax, tmin, dayl_loc, tair)
+    CALL CALCTHRLY(tmax, tmin, dayl, tair)
 
     ! Soil temperature as mean daily air temperature
     CALL CALCTSOIL(tair, tsoil)
@@ -167,15 +162,11 @@ CONTAINS
   ! Parameters (inputs)
   ! - idate [int]: day index (days-since-1950; used by SUN/JDATE).
   ! - alat [float]: latitude in radians.
-  ! - dayl [float]: daylength in hours.
-  ! - dec [float]: solar declination in radians.
-  ! - deltat[12] [float]: monthly temperature amplitude parameters.
   ! - tmin, tmax [float]: daily Tmin/Tmax in deg C.
   ! - sw_mean_wm2 [float]: daily mean shortwave radiation [W m^-2].
   ! - precip_mm [float]: daily precipitation total [mm/day].
   ! - wind_ms [float]: daily mean wind speed [m s^-1].
   ! - press_pa [float]: daily mean air pressure [Pa].
-  ! - ca_umol_mol [float]: daily mean CO2 [umol mol^-1].
   ! - nhrs [int]: length of the hourly series (must equal KHRS compiled into the lib).
   ! Parameters (outputs)
   ! - tair[nhrs], tsoil[nhrs] [float]: air and soil temperature [deg C].
@@ -189,35 +180,33 @@ CONTAINS
   ! - ppt[nhrs] [float]: hourly precipitation [mm/hr], deterministic allocation.
   ! - winda[nhrs] [float]: wind speed [m s^-1].
   ! - press[nhrs] [float]: pressure [Pa].
-  ! - ca[nhrs] [float]: CO2 [umol mol^-1].
   ! Returns
   ! - 0 on success; 1 if nhrs != KHRS.
-  INTEGER(c_int) FUNCTION wg_generate_day(idate, alat, dayl, dec, deltat, &
+  INTEGER(c_int) FUNCTION wg_generate_day(idate, alat, &
                                tmin, tmax, sw_mean_wm2, precip_mm, &
-                               wind_ms, press_pa, ca_umol_mol, &
+                               wind_ms, press_pa, &
                                nhrs, &
                                tair, tsoil, rh, vpd, vmfd, &
-                               radabv, fbeam, ppt, winda, press, ca) &
+                               radabv, fbeam, ppt, winda, press) &
                                BIND(C, NAME='wg_generate_day')
     INTEGER(c_int), VALUE :: idate
-    REAL(c_float), VALUE :: alat, dayl, dec
-    REAL(c_float), INTENT(IN) :: deltat(12)
+    REAL(c_float), VALUE :: alat
     REAL(c_float), VALUE :: tmin, tmax, sw_mean_wm2, precip_mm
-    REAL(c_float), VALUE :: wind_ms, press_pa, ca_umol_mol
+    REAL(c_float), VALUE :: wind_ms, press_pa
     INTEGER(c_int), VALUE :: nhrs
     REAL(c_float), INTENT(OUT) :: tair(*), tsoil(*), rh(*), vpd(*), vmfd(*)
-    REAL(c_float), INTENT(OUT) :: radabv(*), fbeam(*), ppt(*), winda(*), press(*), ca(*)
+    REAL(c_float), INTENT(OUT) :: radabv(*), fbeam(*), ppt(*), winda(*), press(*)
     REAL(c_float) :: radabv2(MAXHRS,3), fbeam2(MAXHRS,3)
     IF (nhrs /= KHRS) THEN
       wg_generate_day = 1_c_int
       RETURN
     END IF
-    CALL wg_generate_day_internal(idate, alat, dayl, dec, deltat, &
+    CALL wg_generate_day_internal(idate, alat, &
                          tmin, tmax, sw_mean_wm2, precip_mm, &
-                         wind_ms, press_pa, ca_umol_mol, &
+                         wind_ms, press_pa, &
                          tair, tsoil, rh, vpd, vmfd, &
                          radabv2, fbeam2, &
-                         ppt, winda, press, ca)
+                         ppt, winda, press)
     ! Copy 2D outputs back into flat column-major buffers length nhrs*3
     BLOCK
       INTEGER :: i, j, idx
