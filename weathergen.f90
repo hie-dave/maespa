@@ -104,6 +104,11 @@ CONTAINS
     REAL :: par_wm2_to_mj
     REAL :: dec, eqntim_loc, dayl, sunset
 
+    ! Initialise globals.
+    KHRS = 24
+    SPERHR = 3600 * 24.0 / KHRS
+    HHRS = (KHRS) / 2.0
+
     ! Compute solar geometry for this day at latitude alat
     idoy = JDATE(idate)
     CALL SUN(idoy, alat, 0.0, dec, eqntim_loc, dayl, sunset)
@@ -197,10 +202,6 @@ CONTAINS
     REAL(c_float), INTENT(OUT) :: tair(*), tsoil(*), rh(*), vpd(*), vmfd(*)
     REAL(c_float), INTENT(OUT) :: radabv(*), fbeam(*), ppt(*), winda(*), press(*)
     REAL(c_float) :: radabv2(MAXHRS,3), fbeam2(MAXHRS,3)
-    IF (nhrs /= KHRS) THEN
-      wg_generate_day = 1_c_int
-      RETURN
-    END IF
     CALL wg_generate_day_internal(idate, alat, &
                          tmin, tmax, sw_mean_wm2, precip_mm, &
                          wind_ms, press_pa, &

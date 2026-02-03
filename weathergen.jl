@@ -659,7 +659,7 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset, rs::NCDat
                 start = (k - 1) * DAY_LENGTH + 1
 
                 # Get pointers to today's data in the long output arrays.
-                GC.@preserve tair_out vpd_out rs_out pr_out ws_out ps_out begin
+                GC.@preserve tair_out vpd_out rs_out pr_out ws_out ps_out tsoil_out rh_out vmfd_out radabv_out fbeam_out begin
 
                     tair_day = pointer(tair_out, start)
                     vpd_day = pointer(vpd_out, start)
@@ -668,11 +668,11 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset, rs::NCDat
                     ws_day = pointer(ws_out, start)
                     ps_day = pointer(ps_out, start)
 
-                    tsoil_day = pointer(tsoil_out, 0)
-                    rh_day = pointer(rh_out, 0)
-                    vmfd_day = pointer(vmfd_out, 0)
-                    radabv_day = pointer(radabv_out, 0)
-                    fbeam_day = pointer(fbeam_out, 0)
+                    tsoil_day = pointer(tsoil_out, 1)
+                    rh_day = pointer(rh_out, 1)
+                    vmfd_day = pointer(vmfd_out, 1)
+                    radabv_day = pointer(radabv_out, 1)
+                    fbeam_day = pointer(fbeam_out, 1)
 
                     # Call the weather generator.
                     wg_generate_day(idate, alat, tmin_data[k], tmax_data[k],
@@ -686,7 +686,7 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset, rs::NCDat
                     # radabv_day. radabv is a 3-column matrix flattened to a
                     # column-major buffer.
                     for ihr in 1:DAY_LENGTH
-                        rs_out[ihr] = radabv_out[ihr] + radabv_out[ihr + DAY_LENGTH]
+                        rs_out[start + ihr - 1] = radabv_out[ihr] + radabv_out[ihr + DAY_LENGTH]
                     end
                 end
             end # iteration through times
