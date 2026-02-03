@@ -9,4 +9,7 @@ compiled/
 Maeserr.dat
 *.mod
 maespa.out
+daily2hourly
+data
+*.so
 
