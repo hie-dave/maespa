@@ -65,8 +65,8 @@ run:
 	./weathergen.jl \
 		--file-tmin $(NC_FILE) --file-tmax $(NC_FILE) \
 		--file-rs $(NC_FILE) --file-pr $(NC_FILE) \
-		--file-ps $(NC_FILE) --file-ws $(NC_FILE) \
+		--file-ps $(NC_FILE) \
 		--out-temp $(NC_OUT) --out-rs $(NC_OUT) \
 		--out-pr $(NC_OUT) --out-ps $(NC_OUT) \
-		--out-ws $(NC_OUT) --out-vpd $(NC_OUT) \
-		--name-tmax tasmax --name-tmin tasmin --show-progress --verbosity 3
+		--out-vpd $(NC_OUT) \
+		--name-tmax tasmax --name-tmin tasmin --verbosity 3

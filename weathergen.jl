@@ -38,18 +38,15 @@ struct Options
     in_rs::String
     in_pr::String
     in_ps::String
-    in_ws::String
     out_temp::String
     out_pr::String
     out_ps::String
     out_rs::String
-    out_ws::String
     out_vpd::String
     name_tmax::String
     name_tmin::String
     out_name_temp::String
     out_name_vpd::String
-    show_progress::Bool
     log_level::Logging.LogLevel
 end
 
@@ -101,10 +98,6 @@ function parse_cli()::Options
             arg_type=String
             required=true
             help="Input file with daily air pressure (Pa)"
-        "--file-ws"
-            arg_type=String
-            required=true
-            help="Input file with daily wind speed (m s-1)"
         "--out-temp"
             arg_type=String
             required=true
@@ -121,10 +114,6 @@ function parse_cli()::Options
             arg_type=String
             required=true
             help="Path to hourly shortwave radiation output file (W m-2)"
-        "--out-ws"
-            arg_type=String
-            required=true
-            help="Path to hourly wind speed output file (m s-1)"
         "--out-vpd"
             arg_type=String
             required=true
@@ -145,9 +134,6 @@ function parse_cli()::Options
             arg_type=String
             default="vpd"
             help="Name of output hourly vapour pressure deficit variable"
-        "--show-progress"
-            action = :store_true
-            help="Show progress bar"
         "--verbosity", "-v"
             arg_type=Int
             default=2
@@ -157,11 +143,11 @@ function parse_cli()::Options
     log_level = parse_log_level(parsed["verbosity"])
     return Options(parsed["seed"], parsed["file-tmin"], parsed["file-tmax"],
                    parsed["file-rs"], parsed["file-pr"], parsed["file-ps"],
-                   parsed["file-ws"], parsed["out-temp"], parsed["out-pr"],
-                   parsed["out-ps"], parsed["out-rs"], parsed["out-ws"],
+                   parsed["out-temp"], parsed["out-pr"],
+                   parsed["out-ps"], parsed["out-rs"],
                    parsed["out-vpd"], parsed["name-tmax"], parsed["name-tmin"],
                    parsed["out-name-temp"], parsed["out-name-vpd"],
-                   parsed["show-progress"], log_level)
+                   log_level)
 end
 
 ################################################################################
@@ -186,7 +172,6 @@ function wg_generate_day(
     tmax::Real,
     sw_mean_wm2::Real,
     precip_mm::Real,
-    wind_ms::Real,
     press_pa::Real,
     nhrs::Int,
     tair::Ptr{Cfloat},
@@ -197,22 +182,20 @@ function wg_generate_day(
     radabv::Ptr{Cfloat},
     fbeam::Ptr{Cfloat},
     ppt::Ptr{Cfloat},
-    winda::Ptr{Cfloat},
     press::Ptr{Cfloat},
 )::Cint
     return ccall(
         (:wg_generate_day, libwg),
         Cint,
-        (Cint, Cfloat, Cfloat, Cfloat, Cfloat, Cfloat, Cfloat, Cfloat, Cint,
+        (Cint, Cfloat, Cfloat, Cfloat, Cfloat, Cfloat, Cfloat, Cint,
             Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat},
-            Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}),
+            Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}),
         Cint(idate),
         Cfloat(alat),
         Cfloat(tmin),
         Cfloat(tmax),
         Cfloat(sw_mean_wm2),
         Cfloat(precip_mm),
-        Cfloat(wind_ms),
         Cfloat(press_pa),
         Cint(nhrs),
         tair,
@@ -223,66 +206,7 @@ function wg_generate_day(
         radabv,
         fbeam,
         ppt,
-        winda,
         press,
-    )
-end
-
-"""Convenience wrapper for `wg_generate_day` using Julia arrays.
-
-Arrays are passed to the underlying Fortran code as pointers.
-"""
-function wg_generate_day!(;
-    idate::Int,
-    alat::Float32,
-    tmin::Float32,
-    tmax::Float32,
-    sw_mean_wm2::Float32,
-    precip_mm::Float32,
-    wind_ms::Float32,
-    press_pa::Float32,
-    tair::Vector{Float32},
-    tsoil::Vector{Float32},
-    rh::Vector{Float32},
-    vpd::Vector{Float32},
-    vmfd::Vector{Float32},
-    radabv::Vector{Float32},
-    fbeam::Vector{Float32},
-    ppt::Vector{Float32},
-    winda::Vector{Float32},
-    press::Vector{Float32},
-)::Cint
-    nhrs::Int = length(tair)
-    @assert length(tsoil) == nhrs
-    @assert length(rh) == nhrs
-    @assert length(vpd) == nhrs
-    @assert length(vmfd) == nhrs
-    @assert length(ppt) == nhrs
-    @assert length(winda) == nhrs
-    @assert length(press) == nhrs
-    @assert length(radabv) == nhrs * 3
-    @assert length(fbeam) == nhrs * 3
-
-    return wg_generate_day(
-        idate,
-        alat,
-        tmin,
-        tmax,
-        sw_mean_wm2,
-        precip_mm,
-        wind_ms,
-        press_pa,
-        nhrs,
-        pointer(tair),
-        pointer(tsoil),
-        pointer(rh),
-        pointer(vpd),
-        pointer(vmfd),
-        pointer(radabv),
-        pointer(fbeam),
-        pointer(ppt),
-        pointer(winda),
-        pointer(press),
     )
 end
 
@@ -522,7 +446,7 @@ end
 
 function init_outfiles(opts::Options, nc_in::NCDataset)
     paths = unique([opts.out_temp, opts.out_rs, opts.out_pr, opts.out_ps,
-                    opts.out_ws, opts.out_vpd])
+                    opts.out_vpd])
     for path in paths
         # Create directory if it doesn't already exist.
         dir = dirname(path)
@@ -567,11 +491,11 @@ function init_outfiles(opts::Options, nc_in::NCDataset)
     end
 end
 
-function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset, rs::NCDataset, pr::NCDataset, ps::NCDataset, ws::NCDataset)
+function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset, rs::NCDataset, pr::NCDataset, ps::NCDataset)
     # Validate dimensions.
-    validate_time_axes([tmin, tmax, rs, pr, ps, ws])
-    validate_spatial_axes([tmin, tmax, rs, pr, ps, ws], STD_LON)
-    validate_spatial_axes([tmin, tmax, rs, pr, ps, ws], STD_LAT)
+    validate_time_axes([tmin, tmax, rs, pr, ps])
+    validate_spatial_axes([tmin, tmax, rs, pr, ps], STD_LON)
+    validate_spatial_axes([tmin, tmax, rs, pr, ps], STD_LAT)
 
     # Validate variables and get dimension indices.
     idx_tmin = validate_variable_from_name(tmin, opts.name_tmin, "degC")
@@ -579,7 +503,6 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset, rs::NCDat
     idx_rs = validate_variable_from_std_name(rs, "surface_downwelling_shortwave_flux_in_air", "W m-2")
     idx_pr = validate_variable_from_std_name(pr, "precipitation_amount", "mm")
     idx_ps = validate_variable_from_std_name(ps, "air_pressure", "Pa")
-    idx_ws = validate_variable_from_std_name(ws, "wind_speed", "m s-1")
 
     # Initialise PRNG seed.
     wg_seed(opts.seed)
@@ -601,7 +524,6 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset, rs::NCDat
     init_outfile(opts.out_rs, rs, name(idx_rs.var))
     init_outfile(opts.out_pr, pr, name(idx_pr.var))
     init_outfile(opts.out_ps, ps, name(idx_ps.var))
-    init_outfile(opts.out_ws, ws, name(idx_ws.var))
 
     # Temperature can be created by copying metadata from tmin input file.
     init_outfile(opts.out_temp, tmin, opts.out_name_temp, opts.name_tmin)
@@ -628,13 +550,11 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset, rs::NCDat
             rs_data = read_variable(idx_rs.var, idx_rs, i, j)
             pr_data = read_variable(idx_pr.var, idx_pr, i, j)
             ps_data = read_variable(idx_ps.var, idx_ps, i, j)
-            ws_data = read_variable(idx_ws.var, idx_ws, i, j)
 
             tair_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
             vpd_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
             rs_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
             pr_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
-            ws_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
             ps_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
 
             # Define daily arrays for the outputs we don't care about. These
@@ -659,13 +579,12 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset, rs::NCDat
                 start = (k - 1) * DAY_LENGTH + 1
 
                 # Get pointers to today's data in the long output arrays.
-                GC.@preserve tair_out vpd_out rs_out pr_out ws_out ps_out tsoil_out rh_out vmfd_out radabv_out fbeam_out begin
+                GC.@preserve tair_out vpd_out rs_out pr_out ps_out tsoil_out rh_out vmfd_out radabv_out fbeam_out begin
 
                     tair_day = pointer(tair_out, start)
                     vpd_day = pointer(vpd_out, start)
                     rs_day = pointer(rs_out, start)
                     pr_day = pointer(pr_out, start)
-                    ws_day = pointer(ws_out, start)
                     ps_day = pointer(ps_out, start)
 
                     tsoil_day = pointer(tsoil_out, 1)
@@ -676,10 +595,10 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset, rs::NCDat
 
                     # Call the weather generator.
                     wg_generate_day(idate, alat, tmin_data[k], tmax_data[k],
-                                    rs_data[k], pr_data[k], ws_data[k],
+                                    rs_data[k], pr_data[k],
                                     ps_data[k], DAY_LENGTH, tair_day,
                                     tsoil_day, rh_day, vpd_day, vmfd_day,
-                                    radabv_day, fbeam_day, pr_day, ws_day,
+                                    radabv_day, fbeam_day, pr_day,
                                     ps_day)
 
                     # rs output is the sum of the PAR and NIR components of
@@ -697,7 +616,6 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset, rs::NCDat
             write_outputs(opts.out_rs, name(idx_rs.var), rs_out, i, j, idx_rs)
             write_outputs(opts.out_pr, name(idx_pr.var), pr_out, i, j, idx_pr)
             write_outputs(opts.out_ps, name(idx_ps.var), ps_out, i, j, idx_ps)
-            write_outputs(opts.out_ws, name(idx_ws.var), ws_out, i, j, idx_ws)
         end # iteration through lons
     end # iteration through lats
 end
@@ -711,9 +629,7 @@ function main(opts::Options)
             NCDataset(opts.in_rs) do rs
                 NCDataset(opts.in_pr) do pr
                     NCDataset(opts.in_ps) do ps
-                        NCDataset(opts.in_ws) do ws
-                            process_data(opts, tmin, tmax, rs, pr, ps, ws)
-                        end
+                        process_data(opts, tmin, tmax, rs, pr, ps)
                     end
                 end
             end

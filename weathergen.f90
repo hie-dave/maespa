@@ -73,9 +73,9 @@ CONTAINS
 
   SUBROUTINE wg_generate_day_internal(idate, alat, &
                               tmin, tmax, sw_mean_wm2, precip_mm, &
-                              wind_ms, press_pa, &
+                              press_pa, &
                               tair, tsoil, rh, vpd, vmfd, &
-                              radabv, fbeam, ppt, winda, press)
+                              radabv, fbeam, ppt, press)
     ! Generate hourly series for a single day from daily inputs.
     ! Inputs
     INTEGER, INTENT(IN) :: idate          ! days-since-1950
@@ -83,13 +83,12 @@ CONTAINS
     REAL,    INTENT(IN) :: tmin, tmax     ! deg C
     REAL,    INTENT(IN) :: sw_mean_wm2    ! W m-2 daily mean shortwave
     REAL,    INTENT(IN) :: precip_mm      ! mm/day
-    REAL,    INTENT(IN) :: wind_ms        ! m s-1 (daily mean)
     REAL,    INTENT(IN) :: press_pa       ! Pa (daily mean)
     ! Outputs (length KHRS)
     REAL,    INTENT(OUT) :: tair(MAXHRS), tsoil(MAXHRS)
     REAL,    INTENT(OUT) :: rh(MAXHRS), vpd(MAXHRS), vmfd(MAXHRS)
     REAL,    INTENT(OUT) :: radabv(MAXHRS,3), fbeam(MAXHRS,3)
-    REAL,    INTENT(OUT) :: ppt(MAXHRS), winda(MAXHRS)
+    REAL,    INTENT(OUT) :: ppt(MAXHRS)
     REAL,    INTENT(OUT) :: press(MAXHRS)
 
     ! Externals from getmet.f90 and radn.f90
@@ -114,9 +113,8 @@ CONTAINS
     CALL SUN(idoy, alat, 0.0, dec, eqntim_loc, dayl, sunset)
     CALL ZENAZ(alat, 0.0, 0.0, dec, eqntim_loc, zen, az)
 
-    ! Wind/pressure constant across hours
+    ! Air pressure constant across hours
     DO ihr = 1, KHRS
-      winda(ihr) = wind_ms
       press(ihr) = press_pa
     END DO
 
@@ -170,7 +168,6 @@ CONTAINS
   ! - tmin, tmax [float]: daily Tmin/Tmax in deg C.
   ! - sw_mean_wm2 [float]: daily mean shortwave radiation [W m^-2].
   ! - precip_mm [float]: daily precipitation total [mm/day].
-  ! - wind_ms [float]: daily mean wind speed [m s^-1].
   ! - press_pa [float]: daily mean air pressure [Pa].
   ! - nhrs [int]: length of the hourly series (must equal KHRS compiled into the lib).
   ! Parameters (outputs)
@@ -183,31 +180,30 @@ CONTAINS
   !   PAR, NIR, thermal radiation.
   ! - fbeam[nhrs*3] [float]: beam fraction components, same layout as radabv.
   ! - ppt[nhrs] [float]: hourly precipitation [mm/hr], deterministic allocation.
-  ! - winda[nhrs] [float]: wind speed [m s^-1].
   ! - press[nhrs] [float]: pressure [Pa].
   ! Returns
   ! - 0 on success; 1 if nhrs != KHRS.
   INTEGER(c_int) FUNCTION wg_generate_day(idate, alat, &
                                tmin, tmax, sw_mean_wm2, precip_mm, &
-                               wind_ms, press_pa, &
+                               press_pa, &
                                nhrs, &
                                tair, tsoil, rh, vpd, vmfd, &
-                               radabv, fbeam, ppt, winda, press) &
+                               radabv, fbeam, ppt, press) &
                                BIND(C, NAME='wg_generate_day')
     INTEGER(c_int), VALUE :: idate
     REAL(c_float), VALUE :: alat
     REAL(c_float), VALUE :: tmin, tmax, sw_mean_wm2, precip_mm
-    REAL(c_float), VALUE :: wind_ms, press_pa
+    REAL(c_float), VALUE :: press_pa
     INTEGER(c_int), VALUE :: nhrs
     REAL(c_float), INTENT(OUT) :: tair(*), tsoil(*), rh(*), vpd(*), vmfd(*)
-    REAL(c_float), INTENT(OUT) :: radabv(*), fbeam(*), ppt(*), winda(*), press(*)
+    REAL(c_float), INTENT(OUT) :: radabv(*), fbeam(*), ppt(*), press(*)
     REAL(c_float) :: radabv2(MAXHRS,3), fbeam2(MAXHRS,3)
     CALL wg_generate_day_internal(idate, alat, &
                          tmin, tmax, sw_mean_wm2, precip_mm, &
-                         wind_ms, press_pa, &
+                         press_pa, &
                          tair, tsoil, rh, vpd, vmfd, &
                          radabv2, fbeam2, &
-                         ppt, winda, press)
+                         ppt, press)
     ! Copy 2D outputs back into flat column-major buffers length nhrs*3
     BLOCK
       INTEGER :: i, j, idx
