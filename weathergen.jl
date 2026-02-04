@@ -78,46 +78,6 @@ function parse_cli()::Options
             arg_type=Int
             default=0
             help="Seed for deterministic PRNG"
-        "--file-tmin"
-            arg_type=String
-            required=true
-            help="Input file with daily minimum temperature (℃)"
-        "--file-tmax"
-            arg_type=String
-            required=true
-            help="Input file with daily maximum temperature (℃)"
-        "--file-rs"
-            arg_type=String
-            required=true
-            help="Input file with daily shortwave radiation (W m-2)"
-        "--file-pr"
-            arg_type=String
-            required=true
-            help="Input file with daily precipitation (mm)"
-        "--file-ps"
-            arg_type=String
-            required=true
-            help="Input file with daily air pressure (Pa)"
-        "--out-temp"
-            arg_type=String
-            required=true
-            help="Path to hourly air temperature output file (℃)"
-        "--out-pr"
-            arg_type=String
-            required=true
-            help="Path to hourly precipitation output file (mm)"
-        "--out-ps"
-            arg_type=String
-            required=true
-            help="Path to hourly air pressure output file (Pa)"
-        "--out-rs"
-            arg_type=String
-            required=true
-            help="Path to hourly shortwave radiation output file (W m-2)"
-        "--out-vpd"
-            arg_type=String
-            required=true
-            help="Path to hourly vapour pressure deficit output file (kPa)"
         "--name-tmax"
             arg_type=String
             default="tasmax"
@@ -138,16 +98,163 @@ function parse_cli()::Options
             arg_type=Int
             default=2
             help="Verbosity level (0: errors, 1: warnings, 2: info, 3: debug)"
+        "-i", "--input-file"
+            arg_type=String
+            help="Input file with daily meteorology. Use this if all variables are in a single file."
+        "-o", "--output-file"
+            arg_type=String
+            help="Desired path to the hourly output file. Use this if all variables are in a single file."
+        "--file-tmin"
+            arg_type=String
+            help="Input file with daily minimum temperature (℃). Mutually exclusive with --input-file."
+        "--file-tmax"
+            arg_type=String
+            help="Input file with daily maximum temperature (℃). Mutually exclusive with --input-file."
+        "--file-rs"
+            arg_type=String
+            help="Input file with daily shortwave radiation (W m-2). Mutually exclusive with --input-file."
+        "--file-pr"
+            arg_type=String
+            help="Input file with daily precipitation (mm). Mutually exclusive with --input-file."
+        "--file-ps"
+            arg_type=String
+            help="Input file with daily air pressure (Pa). Mutually exclusive with --input-file."
+        "--out-temp"
+            arg_type=String
+            help="Path to hourly air temperature output file (℃). Mutually exclusive with --output-file."
+        "--out-rs"
+            arg_type=String
+            help="Path to hourly shortwave radiation output file (W m-2). Mutually exclusive with --output-file."
+        "--out-pr"
+            arg_type=String
+            help="Path to hourly precipitation output file (mm). Mutually exclusive with --output-file."
+        "--out-ps"
+            arg_type=String
+            help="Path to hourly air pressure output file (Pa). Mutually exclusive with --output-file."
+        "--out-vpd"
+            arg_type=String
+            help="Path to hourly vapour pressure deficit output file (kPa). Mutually exclusive with --output-file."
     end
+
     parsed = parse_args(parser)
     log_level = parse_log_level(parsed["verbosity"])
-    return Options(parsed["seed"], parsed["file-tmin"], parsed["file-tmax"],
-                   parsed["file-rs"], parsed["file-pr"], parsed["file-ps"],
-                   parsed["out-temp"], parsed["out-pr"],
-                   parsed["out-ps"], parsed["out-rs"],
-                   parsed["out-vpd"], parsed["name-tmax"], parsed["name-tmin"],
+
+    # Validate file paths.
+    file_tmin = parsed["file-tmin"]
+    file_tmax = parsed["file-tmax"]
+    file_rs = parsed["file-rs"]
+    file_pr = parsed["file-pr"]
+    file_ps = parsed["file-ps"]
+    out_temp = parsed["out-temp"]
+    out_pr = parsed["out-pr"]
+    out_ps = parsed["out-ps"]
+    out_rs = parsed["out-rs"]
+    out_vpd = parsed["out-vpd"]
+
+    if parsed["input-file"] !== nothing || parsed["output-file"] !== nothing
+        if parsed["input-file"] === nothing || parsed["output-file"] === nothing
+            error("Must specify both --input-file and --output-file if using a single file.")
+        end
+        file_tmin = parsed["input-file"]
+        file_tmax = parsed["input-file"]
+        file_rs = parsed["input-file"]
+        file_pr = parsed["input-file"]
+        file_ps = parsed["input-file"]
+        out_temp = parsed["output-file"]
+        out_pr = parsed["output-file"]
+        out_ps = parsed["output-file"]
+        out_rs = parsed["output-file"]
+        out_vpd = parsed["output-file"]
+
+        validate_file_path(parsed["input-file"], "--input-file")
+
+        if parsed["input-file"] == parsed["output-file"]
+            error("Input and output files must be different.")
+        end
+
+        ensure_not_set(parsed["file-tmin"], "--file-tmin")
+        ensure_not_set(parsed["file-tmax"], "--file-tmax")
+        ensure_not_set(parsed["file-rs"], "--file-rs")
+        ensure_not_set(parsed["file-pr"], "--file-pr")
+        ensure_not_set(parsed["file-ps"], "--file-ps")
+
+        ensure_not_set(parsed["out-temp"], "--out-temp")
+        ensure_not_set(parsed["out-pr"], "--out-pr")
+        ensure_not_set(parsed["out-ps"], "--out-ps")
+        ensure_not_set(parsed["out-rs"], "--out-rs")
+        ensure_not_set(parsed["out-vpd"], "--out-vpd")
+    else
+        validate_file_path(file_tmin, "--file-tmin")
+        validate_file_path(file_tmax, "--file-tmax")
+        validate_file_path(file_rs, "--file-rs")
+        validate_file_path(file_pr, "--file-pr")
+        validate_file_path(file_ps, "--file-ps")
+
+        ensure_set(out_temp, "--out-temp")
+        ensure_set(out_pr, "--out-pr")
+        ensure_set(out_ps, "--out-ps")
+        ensure_set(out_rs, "--out-rs")
+        ensure_set(out_vpd, "--out-vpd")
+
+        validate_per_variable_paths([
+            PerVariablePaths(file_tmin, out_temp, "--file-tmin", "--out-temp"),
+            PerVariablePaths(file_tmax, out_temp, "--file-tmax", "--out-temp"),
+            PerVariablePaths(file_rs, out_rs, "--file-rs", "--out-rs"),
+            PerVariablePaths(file_pr, out_pr, "--file-pr", "--out-pr"),
+            PerVariablePaths(file_ps, out_ps, "--file-ps", "--out-ps"),
+        ])
+    end
+
+    return Options(parsed["seed"], file_tmin, file_tmax, file_rs, file_pr,
+                   file_ps, out_temp, out_pr, out_ps, out_rs, out_vpd,
+                   parsed["name-tmax"], parsed["name-tmin"],
                    parsed["out-name-temp"], parsed["out-name-vpd"],
                    log_level)
+end
+
+struct PerVariablePaths
+    input_file::String
+    output_file::String
+    input_arg_name::String
+    output_arg_name::String
+end
+
+function validate_per_variable_paths(paths::Vector{PerVariablePaths})
+    for variable in paths
+        for var2 in paths
+            if var2.input_arg_name == variable.input_arg_name || var2.output_arg_name == variable.output_arg_name
+                continue
+            end
+
+            if variable.input_file == var2.input_file
+                error("$(variable.input_arg_name) and $(var2.input_arg_name) cannot have the same input file (currently: $(variable.input_file)).")
+            end
+
+            if variable.output_file == var2.output_file
+                error("$(variable.output_arg_name) and $(var2.output_arg_name) cannot have the same output file (currently: $(variable.output_file)).")
+            end
+        end
+    end
+end
+
+function ensure_not_set(path::Union{String, Nothing}, arg_name::String)
+    if path !== nothing
+        error("Invalid $arg_name value: cannot specify both $arg_name and --input-file/--output-file")
+    end
+end
+
+function ensure_set(path::Union{String, Nothing}, arg_name::String)
+    if path === nothing
+        error("Missing required argument: $arg_name")
+    end
+end
+
+function validate_file_path(path::Union{String, Nothing}, arg_name::String)
+    ensure_set(path, arg_name)
+
+    if !isfile(path)
+        error("Invalid $arg_name value: file $(path) does not exist.")
+    end
 end
 
 ################################################################################
@@ -621,8 +728,6 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset, rs::NCDat
 end
 
 function main(opts::Options)
-    @info "Running weather generator..."
-
     # Open input files for reading.
     NCDataset(opts.in_tmin) do tmin
         NCDataset(opts.in_tmax) do tmax
