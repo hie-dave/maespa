@@ -45,11 +45,6 @@ const STD_PS = "air_pressure"
 # Number of timesteps per day.
 const DAY_LENGTH = 24
 
-# Constant air pressure to be used when the input file does not contain a
-# pressure variable (Pa).
-# TODO: give this a CLI option.
-const PS_FIXED = 101300.0
-
 # Name of the air pressure variable created in the output file when using fixed
 # air pressure.
 const NAME_PS = "ps"
@@ -88,6 +83,10 @@ struct Options
     chunk_size_lon::Int
     chunk_size_lat::Int
     chunk_size_time::Int
+
+    # Constant air pressure value (Pa) to be used if input data doesn't include
+    # air pressure.
+    default_ps::Float32
 end
 
 struct DimensionIndices
@@ -161,6 +160,10 @@ function parse_cli()::Options
             arg_type=Int
             default=8760
             help="Chunk size to use on the time dimension."
+        "--default-ps"
+            arg_type=Float32
+            default=101300.0f0
+            help="Default air pressure (Pa) to use if no input file is provided."
         "--verbosity", "-v"
             arg_type=Int
             default=2
@@ -278,7 +281,7 @@ function parse_cli()::Options
                    parsed["out-name-temp"], parsed["out-name-vpd"],
                    log_level, parsed["compression-level"],
                    parsed["chunk-lon"], parsed["chunk-lat"],
-                   parsed["chunk-time"])
+                   parsed["chunk-time"], parsed["default-ps"])
 end
 
 function validate_per_variable_paths(paths::Vector{PerVariablePaths})
@@ -775,7 +778,7 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset,
                     get_chunk_size(idx_ps, opts))
         ps_var = name(idx_ps.var)
     else
-        @info "Using fixed air pressure = $(PS_FIXED) $(UNITS_PS)"
+        @info "Using fixed air pressure = $(opts.default_ps) $(UNITS_PS)"
         init_outfile(opts.out_ps, NAME_PS, UNITS_PS, STD_PS, LONG_PS,
                      [dimnames(tmin[opts.name_tmin])...],
                      opts.compression_level, get_chunk_size(idx_tmin, opts))
@@ -811,7 +814,7 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset,
             if dynamic_ps
                 ps_data = read_variable(idx_ps.var, idx_ps, i, j, "Pa")
             else
-                ps_data = fill(PS_FIXED, length(times))
+                ps_data = fill(opts.default_ps, length(times))
             end
 
             tair_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
