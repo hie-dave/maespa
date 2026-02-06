@@ -58,6 +58,9 @@ const STD_PS = "air_pressure"
 # Long name of the air pressure variable in the output file.
 const LONG_PS = "Air pressure"
 
+# Maximum allowed size of a single chunk in bytes: 4GiB.
+const MAX_CHUNK_SIZE = 4 * 1024^3
+
 ################################################################################
 # Types
 ################################################################################
@@ -662,13 +665,77 @@ function init_outfile(path::String, var_name::String, units::String,
     end
 end
 
-function init_outfiles(opts::Options, nc_in::NCDataset)
-    paths = unique([opts.out_temp, opts.out_rs, opts.out_pr, opts.out_ps,
-                    opts.out_vpd])
-
+function create_outfile(nc_in::NCDataset, nc_out::NCDataset, opts::Options)
     compression = opts.compression_level
     shuffle = compression > 0
 
+    # Copy all dimensions from the input file.
+    for dim in keys(nc_in.dim)
+        if dim != "time"
+            size = nc_in.dim[dim]
+            defDim(nc_out, dim, size)
+        end
+    end
+
+    # Copy all global attributes from the input file.
+    copy_attributes(nc_in, nc_out)
+
+    # Create and populate coordinate variables in output file.
+    in_lon = var_from_std_name(nc_in, STD_LON)
+    in_lat = var_from_std_name(nc_in, STD_LAT)
+    in_time = var_from_std_name(nc_in, STD_TIME)
+
+    # Read coordinate values from input file.
+    lons = in_lon[:]
+    lats = in_lat[:]
+
+    # Get the size of each longitude value in bytes.
+    lon_size = sizeof(eltype(lons))
+
+    # Calculate the maximum chunk size for the longitude dimension to
+    # ensure it does not exceed MAX_CHUNK_SIZE.
+    chunk_size_lon = min(Int(MAX_CHUNK_SIZE / lon_size), length(lons))
+    @debug "Longitude axis contains $(length(lons)) values, each of size $lon_size bytes"
+    @debug "Using longitude chunk size of $chunk_size_lon"
+
+    # Create longitude variable in the output file.
+    out_lon = defVar(nc_out, name(in_lon), lons, dimnames(in_lon),
+                        deflatelevel=compression, shuffle=shuffle,
+                        chunksizes=[chunk_size_lon])
+    copy_attributes(in_lon, out_lon)
+
+    # Get the size of each latitude value in bytes.
+    lat_size = sizeof(eltype(lats))
+
+    # Calculate the maximum chunk size for the latitude dimension to
+    # ensure it does not exceed MAX_CHUNK_SIZE.
+    chunk_size_lat = min(Int(MAX_CHUNK_SIZE / lat_size), length(lats))
+    @debug "Latitude axis contains $(length(lats)) values, each of size $lat_size bytes"
+    @debug "Using latitude chunk size of $chunk_size_lat"
+
+    # Create latitude variable in the output file.
+    out_lat = defVar(nc_out, name(in_lat), lats, dimnames(in_lat),
+                        deflatelevel=compression, shuffle=shuffle,
+                        chunksizes=[chunk_size_lat])
+    copy_attributes(in_lat, out_lat)
+
+    # Construct hourly timeseries from each day in the input time
+    # variable.
+    times = in_time[:]
+    hours = [t + Hour(h) for t in times for h in 0:(DAY_LENGTH - 1)]
+    out_time = defVar(nc_out, name(in_time), hours, dimnames(in_time),
+                        attrib = OrderedDict(
+                            ATTR_UNITS => in_time.attrib[ATTR_UNITS],
+                            "calendar" => in_time.attrib["calendar"],
+                        ),
+                        deflatelevel=compression, shuffle=shuffle,
+                        chunksizes=[opts.chunk_size_time])
+    copy_attributes(in_time, out_time)
+end
+
+function init_outfiles(opts::Options, nc_in::NCDataset)
+    paths = unique([opts.out_temp, opts.out_rs, opts.out_pr, opts.out_ps,
+                    opts.out_vpd])
     for path in paths
         # Create directory if it doesn't already exist.
         dir = dirname(path)
@@ -677,48 +744,7 @@ function init_outfiles(opts::Options, nc_in::NCDataset)
         end
 
         NCDataset(path, "c") do nc_out
-            # Copy all dimensions from the input file.
-            for dim in keys(nc_in.dim)
-                if dim != "time"
-                    size = nc_in.dim[dim]
-                    defDim(nc_out, dim, size)
-                end
-            end
-
-            # Copy all global attributes from the input file.
-            copy_attributes(nc_in, nc_out)
-
-            # Create and populate coordinate variables in output file.
-            in_lon = var_from_std_name(nc_in, STD_LON)
-            in_lat = var_from_std_name(nc_in, STD_LAT)
-            in_time = var_from_std_name(nc_in, STD_TIME)
-
-            # TODO: prevent chunk size from exceeding 4GiB. Same for lat.
-            lons = in_lon[:]
-            out_lon = defVar(nc_out, name(in_lon), lons, dimnames(in_lon),
-                             deflatelevel=compression, shuffle=shuffle,
-                             chunksizes=[length(lons)])
-            copy_attributes(in_lon, out_lon)
-
-            lats = in_lat[:]
-            out_lat = defVar(nc_out, name(in_lat), lats, dimnames(in_lat),
-                             deflatelevel=compression, shuffle=shuffle,
-                             chunksizes=[length(lats)])
-            copy_attributes(in_lat, out_lat)
-
-            # Construct hourly timeseries from each day in the input time
-            # variable.
-            # TODO: rethink time chunking. Is input (typically 8760) too small?
-            times = in_time[:]
-            hours = [t + Hour(h) for t in times for h in 0:(DAY_LENGTH - 1)]
-            out_time = defVar(nc_out, name(in_time), hours, dimnames(in_time),
-                              attrib = OrderedDict(
-                                  ATTR_UNITS => in_time.attrib[ATTR_UNITS],
-                                  "calendar" => in_time.attrib["calendar"],
-                              ),
-                              deflatelevel=compression, shuffle=shuffle,
-                              chunksizes=[opts.chunk_size_time])
-            copy_attributes(in_time, out_time)
+            create_outfile(nc_in, nc_out, opts)
         end
     end
 end
