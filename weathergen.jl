@@ -672,7 +672,7 @@ function init_outfiles(opts::Options, nc_in::NCDataset)
     for path in paths
         # Create directory if it doesn't already exist.
         dir = dirname(path)
-        if !isdir(dir)
+        if dir != "" && !isdir(dir)
             mkdir(dir)
         end
 
