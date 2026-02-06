@@ -57,12 +57,3 @@ watbal.o: maestcom.o metcom.o
 
 # Ensure module build order for the standalone converter
 weathergen.o: maestcom.o
-
-NC_FILE=data/silo/processed/CumberlandPlain.nc
-NC_OUT=data/silo/hourly/CumberlandPlain.nc
-
-run:
-	./weathergen.jl \
-		-i $(NC_FILE) \
-		-o $(NC_OUT) \
-		--name-tmax tasmax --name-tmin tasmin --verbosity 3

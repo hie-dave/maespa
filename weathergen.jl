@@ -7,6 +7,11 @@ using Dates
 using DataStructures
 
 ################################################################################
+# Includes
+################################################################################
+include(joinpath(@__DIR__, "units.jl"))
+
+################################################################################
 # Constants
 ################################################################################
 
@@ -40,6 +45,28 @@ const STD_PS = "air_pressure"
 # Number of timesteps per day.
 const DAY_LENGTH = 24
 
+# Constant air pressure to be used when the input file does not contain a
+# pressure variable (Pa).
+# TODO: give this a CLI option.
+const PS_FIXED = 101300.0
+
+# Name of the air pressure variable created in the output file when using fixed
+# air pressure.
+const NAME_PS = "ps"
+
+# Units of the air pressure variable in the output file.
+const UNITS_PS = "Pa"
+
+# Standard name of the air pressure variable in the output file.
+const STD_PS = "air_pressure"
+
+# Long name of the air pressure variable in the output file.
+const LONG_PS = "Air pressure"
+
+################################################################################
+# Types
+################################################################################
+
 struct Options
     seed::Int
     in_tmin::String
@@ -69,6 +96,17 @@ struct DimensionIndices
     index_lat::Int
     index_time::Int
 end
+
+struct PerVariablePaths
+    input_file::String
+    output_file::String
+    input_arg_name::String
+    output_arg_name::String
+end
+
+################################################################################
+# CLI parsing.
+################################################################################
 
 function parse_log_level(level::Int)::Logging.LogLevel
     if level == 0
@@ -243,13 +281,6 @@ function parse_cli()::Options
                    parsed["chunk-time"])
 end
 
-struct PerVariablePaths
-    input_file::String
-    output_file::String
-    input_arg_name::String
-    output_arg_name::String
-end
-
 function validate_per_variable_paths(paths::Vector{PerVariablePaths})
     for variable in paths
         for var2 in paths
@@ -349,6 +380,10 @@ function wg_generate_day(
     )
 end
 
+################################################################################
+# Main script.
+################################################################################
+
 function unique_by_path(ds::AbstractVector{<:NCDataset})::Vector{<:NCDataset}
     seen = Set{String}()
     out = NCDataset[]
@@ -369,6 +404,10 @@ function var_from_std_name(nc::NCDataset, std_name::String)
     else
         error("No variable found with standard name $std_name")
     end
+end
+
+function has_var_with_std_name(nc::NCDataset, std_name::String)::Bool
+    return length(varbyattrib(nc, standard_name = std_name)) > 0
 end
 
 function validate_time_axes(datasets::AbstractVector{<:NCDataset})
@@ -428,14 +467,10 @@ function validate_spatial_axes(datasets::AbstractVector{<:NCDataset},
     end
 end
 
-function validate_variable(nc::NCDataset, var::NCDatasets.CFVariable,
-                           units::String)::DimensionIndices
+function validate_variable(nc::NCDataset,
+                           var::NCDatasets.CFVariable)::DimensionIndices
     if !haskey(var.attrib, ATTR_UNITS)
         error("Variable $(name(var)) has no units attribute")
-    end
-
-    if var.attrib[ATTR_UNITS] != units
-        error("Variable $(name(var)) has units $(var.attrib[ATTR_UNITS]) but expected $units")
     end
 
     # Ensure that the variable is 3-dimensional.
@@ -481,23 +516,23 @@ function validate_variable(nc::NCDataset, var::NCDatasets.CFVariable,
     return DimensionIndices(var, index_lon, index_lat, index_time)
 end
 
-function validate_variable_from_name(nc::NCDataset, name::String,
-                                     units::String)::DimensionIndices
+function validate_variable_from_name(nc::NCDataset,
+                                     name::String)::DimensionIndices
     if !haskey(nc, name)
         error("Variable $name not found in dataset")
     end
     var = nc[name]
-    return validate_variable(nc, var, units)
+    return validate_variable(nc, var)
 end
 
-function validate_variable_from_std_name(nc::NCDataset, std_name::String,
-        units::String)::DimensionIndices
+function validate_variable_from_std_name(nc::NCDataset,
+                                         std_name::String)::DimensionIndices
     var = var_from_std_name(nc, std_name)
-    return validate_variable(nc, var, units)
+    return validate_variable(nc, var)
 end
 
 function read_variable(var::NCDatasets.CFVariable, idx::DimensionIndices,
-                       i::Int, j::Int)
+                       i::Int, j::Int, units::String)
     hyperslab = selectdim(var, idx.index_lat, i)
     hyperslab = selectdim(hyperslab, idx.index_lon, j)
     data = hyperslab[:]
@@ -507,7 +542,14 @@ function read_variable(var::NCDatasets.CFVariable, idx::DimensionIndices,
         error("Missing data in variable $(name(var)) at gridcell ($i, $j)")
     end
 
-    return data
+    # Convert from Vector{Union{Float32, Missing}} to Vector{Float32}.
+    data = convert(Vector{Float32}, data)
+
+    # Get timestep width in seconds.
+    time = var_from_std_name(var.var.ds, STD_TIME)
+    dt = Second(Dates.value(time[2] - time[1]))
+
+    return convert_units(data, var.attrib[ATTR_UNITS], units, dt.value)
 end
 
 """Convert a `DateTime` to Maespa's `idate` (days since 1950-01-01).
@@ -600,6 +642,23 @@ function init_outfile(path::String, nc_in::NCDataset, var_name::String,
                  chunk_sizes)
 end
 
+function init_outfile(path::String, var_name::String, units::String,
+                      std_name::String, long_name::String,
+                      dims::Vector{String},
+                      compression_level::Int,
+                      chunk_sizes::Vector{Int})
+    NCDataset(path, "a") do nc
+        var = defVar(nc, var_name, Float32, dims,
+               deflatelevel=compression_level,
+               shuffle=compression_level > 0,
+               chunksizes=chunk_sizes)
+
+        var.attrib[ATTR_UNITS] = units
+        var.attrib[ATTR_STD_NAME] = std_name
+        var.attrib[ATTR_LONG_NAME] = long_name
+    end
+end
+
 function init_outfiles(opts::Options, nc_in::NCDataset)
     paths = unique([opts.out_temp, opts.out_rs, opts.out_pr, opts.out_ps,
                     opts.out_vpd])
@@ -677,11 +736,17 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset,
     validate_spatial_axes([tmin, tmax, rs, pr, ps], STD_LAT)
 
     # Validate variables and get dimension indices.
-    idx_tmin = validate_variable_from_name(tmin, opts.name_tmin, "degC")
-    idx_tmax = validate_variable_from_name(tmax, opts.name_tmax, "degC")
-    idx_rs = validate_variable_from_std_name(rs, STD_RS, "W m-2")
-    idx_pr = validate_variable_from_std_name(pr, STD_PR, "mm")
-    idx_ps = validate_variable_from_std_name(ps, STD_PS, "Pa")
+    idx_tmin = validate_variable_from_name(tmin, opts.name_tmin)
+    idx_tmax = validate_variable_from_name(tmax, opts.name_tmax)
+    idx_rs = validate_variable_from_std_name(rs, STD_RS)
+    idx_pr = validate_variable_from_std_name(pr, STD_PR)
+    dynamic_ps = has_var_with_std_name(ps, STD_PS)
+
+    if dynamic_ps
+        idx_ps = validate_variable_from_std_name(ps, STD_PS)
+    else
+        idx_ps = idx_tmin
+    end
 
     # Initialise PRNG seed.
     wg_seed(opts.seed)
@@ -704,8 +769,18 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset,
                  get_chunk_size(idx_rs, opts))
     init_outfile(opts.out_pr, pr, name(idx_pr.var), opts.compression_level,
                  get_chunk_size(idx_pr, opts))
-    init_outfile(opts.out_ps, ps, name(idx_ps.var), opts.compression_level,
-                 get_chunk_size(idx_ps, opts))
+
+    if dynamic_ps
+        init_outfile(opts.out_ps, ps, name(idx_ps.var), opts.compression_level,
+                    get_chunk_size(idx_ps, opts))
+        ps_var = name(idx_ps.var)
+    else
+        @info "Using fixed air pressure = $(PS_FIXED) $(UNITS_PS)"
+        init_outfile(opts.out_ps, NAME_PS, UNITS_PS, STD_PS, LONG_PS,
+                     [dimnames(tmin[opts.name_tmin])...],
+                     opts.compression_level, get_chunk_size(idx_tmin, opts))
+        ps_var = NAME_PS
+    end
 
     # Temperature can be created by copying metadata from tmin input file.
     init_outfile(opts.out_temp, tmin, opts.out_name_temp, opts.name_tmin,
@@ -723,17 +798,21 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset,
     # Iterate through gridcells. Generate climate one gridcell at a time.
     for i in eachindex(lats)
         for j in eachindex(lons)
-            lon = lons[j]
             lat = lats[i]
+            lon = lons[j]
 
-            @info "Processing gridcell $i, $j ($lon, $lat)"
+            @info "Processing gridcell $i, $j ($lat, $lon)"
 
             # Read timeseries for this gridcell.
-            tmin_data = read_variable(idx_tmin.var, idx_tmin, i, j)
-            tmax_data = read_variable(idx_tmax.var, idx_tmax, i, j)
-            rs_data = read_variable(idx_rs.var, idx_rs, i, j)
-            pr_data = read_variable(idx_pr.var, idx_pr, i, j)
-            ps_data = read_variable(idx_ps.var, idx_ps, i, j)
+            tmin_data = read_variable(idx_tmin.var, idx_tmin, i, j, "degC")
+            tmax_data = read_variable(idx_tmax.var, idx_tmax, i, j, "degC")
+            rs_data = read_variable(idx_rs.var, idx_rs, i, j, "W m-2")
+            pr_data = read_variable(idx_pr.var, idx_pr, i, j, "mm")
+            if dynamic_ps
+                ps_data = read_variable(idx_ps.var, idx_ps, i, j, "Pa")
+            else
+                ps_data = fill(PS_FIXED, length(times))
+            end
 
             tair_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
             vpd_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
@@ -802,7 +881,7 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset,
             write_outputs(opts.out_vpd, name_vpd, vpd_out, i, j, idx_vpd)
             write_outputs(opts.out_rs, name(idx_rs.var), rs_out, i, j, idx_rs)
             write_outputs(opts.out_pr, name(idx_pr.var), pr_out, i, j, idx_pr)
-            write_outputs(opts.out_ps, name(idx_ps.var), ps_out, i, j, idx_ps)
+            write_outputs(opts.out_ps, ps_var, ps_out, i, j, idx_ps)
         end # iteration through lons
     end # iteration through lats
 end
