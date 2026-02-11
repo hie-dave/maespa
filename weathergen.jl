@@ -331,6 +331,11 @@ end
 ################################################################################
 const libwg = joinpath(@__DIR__, "libweathergen.so")
 
+function wg_init()::Nothing
+    ccall((:wg_init, libwg), Cvoid, ())
+    return nothing
+end
+
 # Seed wrapper
 function wg_seed(seed::Int)::Cint
     return ccall((:wg_seed, libwg), Cint, (Int64,), Int64(seed))
@@ -934,5 +939,5 @@ opts = parse_cli()
 
 logger = ConsoleLogger(stdout, opts.log_level)
 global_logger(logger)
-
+wg_init()
 main(opts)

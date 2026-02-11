@@ -103,11 +103,6 @@ CONTAINS
     REAL :: par_wm2_to_mj
     REAL :: dec, eqntim_loc, dayl, sunset
 
-    ! Initialise globals.
-    KHRS = 24
-    SPERHR = 3600 * 24.0 / KHRS
-    HHRS = (KHRS) / 2.0
-
     ! Compute solar geometry for this day at latitude alat
     idoy = JDATE(idate)
     CALL SUN(idoy, alat, 0.0, dec, eqntim_loc, dayl, sunset)
@@ -146,6 +141,14 @@ CONTAINS
     CALL wg_assignrain_det(precip_mm, ppt)
 
   END SUBROUTINE wg_generate_day_internal
+
+  SUBROUTINE wg_init() BIND(C, NAME='wg_init')
+    ! C API: Initialize the module. Must be called before any other functions.
+    ! Sets global parameters and RNG state.
+    KHRS = 24
+    SPERHR = 3600 * 24.0 / KHRS
+    HHRS = (KHRS) / 2.0
+  END SUBROUTINE wg_init
 
   ! C API: Seed the deterministic RNG used for rainfall timing and any stochastic components.
   ! Parameters
