@@ -909,9 +909,13 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset,
                 end
             end # iteration through times
 
-            # Write data for this gridcell to the output files.
+            # Convert VPD from Pa to kPa.
+            vpd_out /= 1000
+
             name_temp = opts.out_name_temp
             name_vpd = opts.out_name_vpd
+
+            # Write data for this gridcell to the output files.
             write_outputs(opts.out_temp, name_temp, tair_out, i, j, idx_temp)
             write_outputs(opts.out_vpd, name_vpd, vpd_out, i, j, idx_vpd)
             write_outputs(opts.out_rs, name(idx_rs.var), rs_out, i, j, idx_rs)
