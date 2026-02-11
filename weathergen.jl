@@ -558,7 +558,8 @@ function read_variable(var::NCDatasets.CFVariable, idx::DimensionIndices,
 
     # Get timestep width in seconds.
     time = var_from_std_name(var.var.ds, STD_TIME)
-    dt = Second(Dates.value(time[2] - time[1]))
+    # TODO: more robust time delta handling.
+    dt = Second(Dates.value(time[2] - time[1]) / 1000)
 
     return convert_units(data, var.attrib[ATTR_UNITS], units, dt.value)
 end
