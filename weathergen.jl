@@ -61,6 +61,18 @@ const LONG_PS = "Air pressure"
 # Maximum allowed size of a single chunk in bytes: 4GiB.
 const MAX_CHUNK_SIZE = 4 * 1024^3
 
+# Units of the air temperature variable in the output file.
+const UNITS_TEMP = "degC"
+
+# Units of the shortwave radiation variable in the output file.
+const UNITS_RS = "W m-2"
+
+# Units of the VPD variable in the output file.
+const UNITS_VPD = "kPa"
+
+# Units of the precipitation variable in the output file.
+const UNITS_PR = "mm"
+
 ################################################################################
 # Types
 ################################################################################
@@ -629,7 +641,7 @@ end
 
 function init_outfile(path::String, nc_in::NCDataset, out_var_name::String,
                       in_var_name::String, compression_level::Int,
-                      chunk_sizes::Vector{Int})
+                      chunk_sizes::Vector{Int}, units::String)
     # Open the file and create the required output variable.
     NCDataset(path, "a") do nc_out
         # Get the input variable.
@@ -643,15 +655,17 @@ function init_outfile(path::String, nc_in::NCDataset, out_var_name::String,
                      shuffle=compression_level > 0,
                      chunksizes=chunk_sizes)
         copy_attributes(in_var, var)
+        var.attrib[ATTR_UNITS] = units
     end
 end
 
 # Convenience function for when the output variable name is the same as the
 # input variable name.
 function init_outfile(path::String, nc_in::NCDataset, var_name::String,
-                      compression_level::Int, chunk_sizes::Vector{Int})
+                      compression_level::Int, chunk_sizes::Vector{Int},
+                      units::String)
     init_outfile(path, nc_in, var_name, var_name, compression_level,
-                 chunk_sizes)
+                 chunk_sizes, units)
 end
 
 function init_outfile(path::String, var_name::String, units::String,
@@ -801,13 +815,13 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset,
     # Initialise data variables in output files.
     # path::String, nc_in::NCDataset, out_var_name::String, in_var_name::String
     init_outfile(opts.out_rs, rs, name(idx_rs.var), opts.compression_level,
-                 get_chunk_size(idx_rs, opts))
+                 get_chunk_size(idx_rs, opts), UNITS_RS)
     init_outfile(opts.out_pr, pr, name(idx_pr.var), opts.compression_level,
-                 get_chunk_size(idx_pr, opts))
+                 get_chunk_size(idx_pr, opts), UNITS_PR)
 
     if dynamic_ps
         init_outfile(opts.out_ps, ps, name(idx_ps.var), opts.compression_level,
-                    get_chunk_size(idx_ps, opts))
+                    get_chunk_size(idx_ps, opts), UNITS_PS)
         ps_var = name(idx_ps.var)
     else
         @info "Using fixed air pressure = $(opts.default_ps) $(UNITS_PS)"
@@ -819,14 +833,15 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset,
 
     # Temperature can be created by copying metadata from tmin input file.
     init_outfile(opts.out_temp, tmin, opts.out_name_temp, opts.name_tmin,
-                 opts.compression_level, get_chunk_size(idx_tmin, opts))
+                 opts.compression_level, get_chunk_size(idx_tmin, opts),
+                 UNITS_TEMP)
     idx_temp = idx_tmin # same dimension order as tmin
 
     # VPD must be created from scratch. We can use same dimension order as tmin
     # input file.
     init_outfile(opts.out_vpd, opts.out_name_vpd,
                  [dimnames(tmin[opts.name_tmin])...],
-                 "kPa", "vapour_pressure_deficit", "Vapour pressure deficit",
+                 UNITS_VPD, "vapour_pressure_deficit", "Vapour pressure deficit",
                  opts.compression_level, get_chunk_size(idx_tmin, opts))
     idx_vpd = idx_tmin # same dimension order as tmin
 
