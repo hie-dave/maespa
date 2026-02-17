@@ -872,6 +872,23 @@ function mix64(seed::Int, lat::Float32, lon::Float32)::UInt64
                  reinterpret(UInt64, Float64(lon)))
 end
 
+function get_workload(opts::Options,
+                      var_lat::NCDatasets.CFVariable,
+                      var_lon::NCDatasets.CFVariable)::Tuple{UnitRange{Int}, UnitRange{Int}}
+    lats = var_lat[:]
+    lons = var_lon[:]
+
+    # If running in serial mode, return all latitudes and longitudes.
+    if !opts.parallel
+        return (eachindex(lats), eachindex(lons))
+    end
+
+    # TODO: implement spatial workload partitioning for parallel mode. For now,
+    # just return empty ranges, which will cause the main loop to be skipped in
+    # parallel mode.
+    return ([], [])
+end
+
 function generate_weather(opts::Options, indices::DimensionOrders,
                           writers::Writers, dynamic_ps::Bool)
     idx_tmin = indices.idx_tmin
@@ -891,9 +908,11 @@ function generate_weather(opts::Options, indices::DimensionOrders,
     lats = var_lat[:]
     times = var_time[:]
 
+    (ilats, ilons) = get_workload(opts, var_lat, var_lon)
+
     # Iterate through gridcells. Generate climate one gridcell at a time.
-    for i in eachindex(lats)
-        for j in eachindex(lons)
+    for i in ilats
+        for j in ilons
             lat = lats[i]
             lon = lons[j]
 
