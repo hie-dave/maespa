@@ -1,4 +1,17 @@
 #!/usr/bin/env julia
+#
+# Usage:
+# ./weathergen.jl -i infile.nc -o outfile.nc
+#
+# Parallel usage:
+# mpiexecjl -n 4 ./weathergen.jl -i infile.nc -o outfile.nc
+#
+# Note: mpiexecjl must first be installed (typically to ~/.julia/bin):
+# using Pkg
+# Pkg.add("MPIPreferences")
+# using MPIPreferences
+# MPIPreferences.install_mpiexecjl()
+#
 
 using ArgParse
 using Logging
@@ -108,6 +121,7 @@ struct Options
     # Constant air pressure value (Pa) to be used if input data doesn't include
     # air pressure.
     default_ps::Float32
+    parallel::Bool
 end
 
 struct DimensionIndices
@@ -207,6 +221,9 @@ function parse_cli()::Options
             arg_type=Int
             default=2
             help="Verbosity level (0: errors, 1: warnings, 2: info, 3: debug)"
+        "-P", "--parallel"
+            action=:store_true
+            help="Use MPI for parallel processing. All MPI-specific behaviour is hidden behind this flag."
         "-i", "--input-file"
             arg_type=String
             help="Input file with daily meteorology. Use this if all variables are in a single file."
@@ -320,7 +337,8 @@ function parse_cli()::Options
                    parsed["out-name-temp"], parsed["out-name-vpd"],
                    log_level, parsed["compression-level"],
                    parsed["chunk-lon"], parsed["chunk-lat"],
-                   parsed["chunk-time"], parsed["default-ps"])
+                   parsed["chunk-time"], parsed["default-ps"],
+                   parsed["parallel"])
 end
 
 function validate_per_variable_paths(paths::Vector{PerVariablePaths})
@@ -440,6 +458,22 @@ end
 ################################################################################
 # Main script.
 ################################################################################
+
+function get_rank()::Int
+    if @isdefined MPI
+        return MPI.Comm_rank(MPI.COMM_WORLD)
+    else
+        return 0
+    end
+end
+
+function get_world_size()::Int
+    if @isdefined MPI
+        return MPI.Comm_size(MPI.COMM_WORLD)
+    else
+        return 1
+    end
+end
 
 function unique_by_path(ds::AbstractVector{<:NCDataset})::Vector{<:NCDataset}
     seen = Set{String}()
@@ -1030,6 +1064,13 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset,
 end
 
 function main(opts::Options)
+    if opts.parallel && get_rank() != 0
+        # Temporary hack to ensure successful logic/completion.
+        return
+    end
+
+    wg_init()
+
     # Open input files for reading.
     NCDataset(opts.in_tmin) do tmin
         NCDataset(opts.in_tmax) do tmax
@@ -1048,5 +1089,27 @@ opts = parse_cli()
 
 logger = ConsoleLogger(stdout, opts.log_level)
 global_logger(logger)
-wg_init()
-main(opts)
+
+if opts.parallel
+    @eval using MPI
+    MPI.Init()
+    if get_world_size() == 1
+        @warn "MPI parallelism enabled but only one process detected; running in serial. This is almost certainly not what you want. To fix, run with multiple processes (e.g. using mpirun)."
+    end
+
+    @info "Running on rank $(get_rank()) of $(get_world_size())"
+end
+
+try
+    main(opts)
+    if opts.parallel && MPI.Initialized() && !MPI.Finalized()
+        MPI.Finalize()
+    end
+catch err
+    if opts.parallel
+        @error "Error on rank $(get_rank()): $err"
+        Base.display_error(err, catch_backtrace())
+        MPI.Abort(MPI.COMM_WORLD, 1)
+    end
+    rethrow()
+end
