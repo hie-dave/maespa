@@ -73,6 +73,12 @@ const UNITS_VPD = "kPa"
 # Units of the precipitation variable in the output file.
 const UNITS_PR = "mm"
 
+# Constants for splitmix64.
+const C1 = 0x9e3779b97f4a7c15
+const C2 = 0xbf58476d1ce4e5b9
+const C3 = 0x94d049bb133111eb
+const WG_SEED_DEFAULT = 88172645463393265
+
 ################################################################################
 # Types
 ################################################################################
@@ -367,8 +373,18 @@ function wg_init()::Nothing
 end
 
 # Seed wrapper
-function wg_seed(seed::Int)::Cint
-    return ccall((:wg_seed, libwg), Cint, (Int64,), Int64(seed))
+function wg_seed(seed::Int64)::Cint
+    # Seed value of 0 causes RNG to depend on prior state, which breaks
+    # reproducibility. In that case, use default seed value instead.
+    if seed == 0
+        @warn "Seed value of 0 is not allowed; using default seed value of $WG_SEED_DEFAULT instead."
+        seed = WG_SEED_DEFAULT
+    end
+    return ccall((:wg_seed, libwg), Cint, (Int64,), seed)
+end
+
+function wg_seed(seed::UInt64)::Cint
+    return wg_seed(reinterpret(Int64, seed))
 end
 
 """Generate hourly meteorology for a single day.
@@ -791,11 +807,39 @@ function get_chunk_size(indices::DimensionIndices, opts::Options)
     return chunks
 end
 
+# Deterministic 64-bit mix (SplitMix64-style constants).
+function mix64(base_seed::UInt64, i::UInt64, j::UInt64)::UInt64
+    u = base_seed
+    u ⊻= i * C1
+    u ⊻= j * C2
+
+    u += C1
+    u = (u ⊻ (u >> 30)) * C2
+    u = (u ⊻ (u >> 27)) * C3
+    u = u ⊻ (u >> 31)
+    return u
+end
+
+function mix64(seed::Int, i::Int, j::Int)::UInt64
+    return mix64(reinterpret(UInt64, Int64(seed)),
+                 reinterpret(UInt64, Int64(i)),
+                 reinterpret(UInt64, Int64(j)))
+end
+
+function mix64(seed::Int, lat::Float64, lon::Float64)::UInt64
+    return mix64(reinterpret(UInt64, Int64(seed)),
+                 reinterpret(UInt64, lat),
+                 reinterpret(UInt64, lon))
+end
+
+function mix64(seed::Int, lat::Float32, lon::Float32)::UInt64
+    return mix64(reinterpret(UInt64, Int64(seed)),
+                 reinterpret(UInt64, Float64(lat)),
+                 reinterpret(UInt64, Float64(lon)))
+end
+
 function generate_weather(opts::Options, indices::DimensionOrders,
                           writers::Writers, dynamic_ps::Bool)
-    # Initialise PRNG seed.
-    wg_seed(opts.seed)
-
     idx_tmin = indices.idx_tmin
     idx_tmax = indices.idx_tmax
     idx_rs = indices.idx_rs
@@ -818,6 +862,9 @@ function generate_weather(opts::Options, indices::DimensionOrders,
         for j in eachindex(lons)
             lat = lats[i]
             lon = lons[j]
+
+            # Initialise PRNG seed.
+            wg_seed(mix64(opts.seed, lat, lon))
 
             @info "Processing gridcell $i, $j ($lat, $lon)"
 

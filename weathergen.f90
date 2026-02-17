@@ -152,7 +152,7 @@ CONTAINS
 
   ! C API: Seed the deterministic RNG used for rainfall timing and any stochastic components.
   ! Parameters
-  ! - seed [int64]: deterministic seed. Use 0 to keep the existing default seed.
+  ! - seed [int64]: deterministic seed.
   ! Returns
   ! - 0 on success.
   INTEGER(c_int) FUNCTION wg_seed(seed) BIND(C, NAME='wg_seed')
