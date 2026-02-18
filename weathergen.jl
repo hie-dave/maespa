@@ -730,6 +730,10 @@ function create_var(path::String, name::String, units::String,
                     std_name::String, long_name::String,
                     dims::Vector{String}, compression_level::Int,
                     chunk_sizes::Vector{Int})
+
+    # No need to use the open_netcdf() MPI-mode wrapper here, because variable
+    # creation only occurs on the master node, so we can just use independent
+    # access mode (the default).
     NCDataset(path, "a") do nc_out
         var = defVar(nc_out, name, Float32, dims,
                      deflatelevel=compression_level,
@@ -840,6 +844,8 @@ function create_output_files(opts::Options, nc_in::NCDataset)
             mkdir(dir)
         end
 
+        # Note: we never enable MPI parallel access when creating output files,
+        # because this is only done by the master node.
         NCDataset(path, "c") do nc_out
             create_outfile(nc_in, nc_out, opts)
         end
@@ -1010,6 +1016,11 @@ function generate_weather(opts::Options, indices_in::InputDimensionOrders,
 end
 
 function initialise_output_files(opts::Options, idx_in::InputDimensionOrders)
+    if opts.parallel && get_rank() != 0
+        # Only the master node should create output files, to avoid conflicts.
+        return
+    end
+
     # Get a reference to the tmin dataset. This will be useful as a template.
     tmin = idx_in.idx_tmin.var.var.ds
 
@@ -1062,6 +1073,20 @@ function initialise_output_files(opts::Options, idx_in::InputDimensionOrders)
                dims_ps, opts.compression_level, chunks_ps)
 end
 
+function open_netcdf(f::Function, path::AbstractString, mode::AbstractString,
+                     opts::Options)
+    nc = NCDataset(path, mode)
+    if opts.parallel
+        NCDatasets.paraccess(nc, :collective)
+    end
+
+    try
+        return f(nc)
+    finally
+        close(nc)
+    end
+end
+
 function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset,
                       rs::NCDataset, pr::NCDataset, ps::NCDataset)
     # Validate dimensions.
@@ -1084,16 +1109,16 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset,
     idx_in = InputDimensionOrders(idx_tmin, idx_tmax, idx_rs, idx_pr, idx_ps)
     initialise_output_files(opts, idx_in)
 
-    NCDataset(opts.out_temp, "a") do nc_out_temp
+    open_netcdf(opts.out_temp, "a", opts) do nc_out_temp
         idx_temp = validate_variable_from_std_name(nc_out_temp, STD_TEMP)
-        NCDataset(opts.out_vpd, "a") do nc_out_vpd
+        open_netcdf(opts.out_vpd, "a", opts) do nc_out_vpd
             idx_vpd = validate_variable_from_std_name(nc_out_vpd, STD_VPD)
-            NCDataset(opts.out_rs, "a") do nc_out_rs
+            open_netcdf(opts.out_rs, "a", opts) do nc_out_rs
                 idx_rs_out = validate_variable_from_std_name(nc_out_rs, STD_RS)
-                NCDataset(opts.out_pr, "a") do nc_out_pr
+                open_netcdf(opts.out_pr, "a", opts) do nc_out_pr
                     idx_pr_out = validate_variable_from_std_name(nc_out_pr,
                                                                  STD_PR)
-                    NCDataset(opts.out_ps, "a") do nc_out_ps
+                    open_netcdf(opts.out_ps, "a", opts) do nc_out_ps
                         idx_ps_out = validate_variable_from_std_name(nc_out_ps,
                                                                      STD_PS)
                         idx_out = OutputDimensionOrders(
@@ -1108,19 +1133,14 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset,
 end
 
 function main(opts::Options)
-    if opts.parallel && get_rank() != 0
-        # Temporary hack to ensure successful logic/completion.
-        return
-    end
-
     wg_init()
 
     # Open input files for reading.
-    NCDataset(opts.in_tmin) do tmin
-        NCDataset(opts.in_tmax) do tmax
-            NCDataset(opts.in_rs) do rs
-                NCDataset(opts.in_pr) do pr
-                    NCDataset(opts.in_ps) do ps
+    open_netcdf(opts.in_tmin, "r", opts) do tmin
+        open_netcdf(opts.in_tmax, "r", opts) do tmax
+            open_netcdf(opts.in_rs, "r", opts) do rs
+                open_netcdf(opts.in_pr, "r", opts) do pr
+                    open_netcdf(opts.in_ps, "r", opts) do ps
                         process_data(opts, tmin, tmax, rs, pr, ps)
                     end
                 end
