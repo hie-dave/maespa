@@ -1,11 +1,20 @@
-#!/usr/bin/env julia
+#!/usr/bin/env -S julia --project=@.
 using Test
 using Dates
 using Statistics
 using NCDatasets
 using Logging
 
-include("weathergen.jl")
+# If Revise is available, use it to include the weathergen module in a way that
+# allows for interactive development. Otherwise, just include the file directly.
+if Base.find_package("Revise") !== nothing
+    using Revise
+    includet("weathergen.jl")
+else
+    include("weathergen.jl")
+end
+
+using .Weathergen
 
 function write_synthetic_daily_input(path::AbstractString)
     lats = Float32[-35.0f0, -34.0f0]
@@ -78,7 +87,7 @@ end
 
 function run_weathergen(input_path::AbstractString, output_path::AbstractString)
     seed = 123
-    opts = Options(
+    opts = Weathergen.Options(
         seed,          # seed::Int
         input_path,    # in_tmin::String
         input_path,    # in_tmax::String
@@ -102,7 +111,7 @@ function run_weathergen(input_path::AbstractString, output_path::AbstractString)
         101300,        # default_ps::Float32
         false,         # parallel::Bool
     )
-    cli_main(opts)
+    Weathergen.cli_main(opts)
 end
 
 function read_output(path::AbstractString)

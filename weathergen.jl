@@ -1,4 +1,4 @@
-#!/usr/bin/env julia
+#!/usr/bin/env -S julia --project=@.
 #
 # Usage:
 # ./weathergen.jl -i infile.nc -o outfile.nc
@@ -12,6 +12,8 @@
 # using MPIPreferences
 # MPIPreferences.install_mpiexecjl()
 #
+
+module Weathergen
 
 using ArgParse
 using Logging
@@ -1157,6 +1159,8 @@ function cli_main(opts::Options)
         rethrow()
     end
 end
+
+end # module
 
 if abspath(PROGRAM_FILE) == @__FILE__
     opts = parse_cli()

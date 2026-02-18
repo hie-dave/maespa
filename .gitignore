@@ -12,4 +12,4 @@ maespa.out
 daily2hourly
 data
 *.so
-
+*.stamp
