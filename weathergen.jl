@@ -65,14 +65,17 @@ const NAME_PS = "ps"
 # Units of the air pressure variable in the output file.
 const UNITS_PS = "Pa"
 
-# Standard name of the air pressure variable in the output file.
-const STD_PS = "air_pressure"
-
 # Long name of the air pressure variable in the output file.
 const LONG_PS = "Air pressure"
 
 # Maximum allowed size of a single chunk in bytes: 4GiB.
 const MAX_CHUNK_SIZE = 4 * 1024^3
+
+# Standard name of air temperature (as per CF spec).
+const STD_TEMP = "air_temperature"
+
+# Long name of air temperature (as per CF spec).
+const LONG_TEMP = "Air temperature"
 
 # Units of the air temperature variable in the output file.
 const UNITS_TEMP = "degC"
@@ -86,6 +89,27 @@ const UNITS_VPD = "kPa"
 # Units of the precipitation variable in the output file.
 const UNITS_PR = "mm"
 
+# Default constant air pressure if not using dynamic air pressure (Pa).
+const DEFAULT_PS = 101300
+
+# Standard name of VPD (as per CF spec).
+const STD_VPD = "vapour_pressure_deficit"
+
+# Long name of VPD (as per CF spec).
+const LONG_VPD = "Vapour pressure deficit"
+
+# Required units of air temperature.
+const REQ_UNITS_TEMP = "degC"
+
+# Required units of radiation.
+const REQ_UNITS_RS = "W m-2"
+
+# Required units of precipitation.
+const REQ_UNITS_PR = "mm"
+
+# Required units of air pressure.
+const REQ_UNITS_PS = "Pa"
+
 # Constants for splitmix64.
 const C1 = 0x9e3779b97f4a7c15
 const C2 = 0xbf58476d1ce4e5b9
@@ -96,6 +120,7 @@ const WG_SEED_DEFAULT = 88172645463393265
 # Types
 ################################################################################
 
+# Parsed CLI options.
 struct Options
     seed::Int
     in_tmin::String
@@ -124,6 +149,7 @@ struct Options
     parallel::Bool
 end
 
+# Struct to hold a variable along with the indices of its dimensions.
 struct DimensionIndices
     var::NCDatasets.CFVariable
     index_lon::Int
@@ -131,6 +157,8 @@ struct DimensionIndices
     index_time::Int
 end
 
+# Struct to hold input and output file paths for a given variable, along with
+# the corresponding CLI argument names for error reporting.
 struct PerVariablePaths
     input_file::String
     output_file::String
@@ -138,22 +166,29 @@ struct PerVariablePaths
     output_arg_name::String
 end
 
-struct Writers
-    tair::NCDatasets.CFVariable
-    vpd::NCDatasets.CFVariable
-    rs::NCDatasets.CFVariable
-    pr::NCDatasets.CFVariable
-    ps::NCDatasets.CFVariable
-end
-
-struct DimensionOrders
+# Dimension orders for input variables.
+struct InputDimensionOrders
     idx_tmin::DimensionIndices
     idx_tmax::DimensionIndices
     idx_rs::DimensionIndices
     idx_pr::DimensionIndices
     idx_ps::Union{DimensionIndices, Nothing}
+end
+
+# Dimension orders for output variables.
+struct OutputDimensionOrders
+    idx_rs::DimensionIndices
+    idx_pr::DimensionIndices
     idx_temp::DimensionIndices
     idx_vpd::DimensionIndices
+    idx_ps::DimensionIndices
+end
+
+# Chunk sizes for each dimension.
+struct ChunkSizes
+    lon::Int
+    lat::Int
+    time::Int
 end
 
 ################################################################################
@@ -215,7 +250,7 @@ function parse_cli()::Options
             help="Chunk size to use on the time dimension."
         "--default-ps"
             arg_type=Float32
-            default=101300.0f0
+            default=DEFAULT_PS
             help="Default air pressure (Pa) to use if no input file is provided."
         "--verbosity", "-v"
             arg_type=Int
@@ -622,26 +657,25 @@ function validate_variable_from_std_name(nc::NCDataset,
     return validate_variable(nc, var)
 end
 
-function read_variable(var::NCDatasets.CFVariable, idx::DimensionIndices,
-                       i::Int, j::Int, units::String)
-    hyperslab = selectdim(var, idx.index_lat, i)
-    hyperslab = selectdim(hyperslab, idx.index_lon, j)
+function read(indices::DimensionIndices, i::Int, j::Int, units::String)
+    hyperslab = selectdim(indices.var, indices.index_lat, i)
+    hyperslab = selectdim(hyperslab, indices.index_lon, j)
     data = hyperslab[:]
 
     # Error if any data is missing.
     if any(ismissing, data)
-        error("Missing data in variable $(name(var)) at gridcell ($i, $j)")
+        error("Missing data in variable $(name(indices.var)) at gridcell ($i, $j)")
     end
 
     # Convert from Vector{Union{Float32, Missing}} to Vector{Float32}.
     data = convert(Vector{Float32}, data)
 
     # Get timestep width in seconds.
-    time = var_from_std_name(var.var.ds, STD_TIME)
+    time = var_from_std_name(indices.var.var.ds, STD_TIME)
     # TODO: more robust time delta handling.
     dt = Second(Dates.value(time[2] - time[1]) / 1000)
 
-    return convert_units(data, var.attrib[ATTR_UNITS], units, dt.value)
+    return convert_units(data, indices.var.attrib[ATTR_UNITS], units, dt.value)
 end
 
 """Convert a `DateTime` to Maespa's `idate` (days since 1950-01-01).
@@ -672,9 +706,9 @@ function date_to_idate(date::DateTime)
     return daysBeforeYear + dayOfYear - 1
 end
 
-function write_outputs(var::NCDatasets.CFVariable, data::Vector{Float32},
-                       ilat::Int, ilon::Int, indices::DimensionIndices)
-    hyperslab = selectdim(var, indices.index_lat, ilat)
+function write(indices::DimensionIndices, data::Vector{Float32},
+               ilat::Int, ilon::Int)
+    hyperslab = selectdim(indices.var, indices.index_lat, ilat)
     hyperslab = selectdim(hyperslab, indices.index_lon, ilon)
     hyperslab[:] = data
 end
@@ -689,64 +723,36 @@ function copy_attributes(in::NcAttribContainer, out::NcAttribContainer)
     end
 end
 
-function init_outfile(path::String, name::String, dims::Vector{String},
-                      units::String, std_name::String, long_name::String,
-                      compression_level::Int, chunk_sizes::Vector{Int})
+# Create a variable in the output file using the specified metadata.
+function create_var(path::String, name::String, units::String,
+                    std_name::String, long_name::String,
+                    dims::Vector{String}, compression_level::Int,
+                    chunk_sizes::Vector{Int})
     NCDataset(path, "a") do nc_out
         var = defVar(nc_out, name, Float32, dims,
                      deflatelevel=compression_level,
                      shuffle=compression_level > 0,
-                     chunksizes=chunk_sizes)
+                     chunksizes=chunk_sizes,
+                     fillvalue=fillvalue(Float32))
         var.attrib[ATTR_UNITS] = units
         var.attrib[ATTR_STD_NAME] = std_name
         var.attrib[ATTR_LONG_NAME] = long_name
-    end
-end
-
-function init_outfile(path::String, nc_in::NCDataset, out_var_name::String,
-                      in_var_name::String, compression_level::Int,
-                      chunk_sizes::Vector{Int}, units::String)
-    # Open the file and create the required output variable.
-    NCDataset(path, "a") do nc_out
-        # Get the input variable.
-        in_var = nc_in[in_var_name]
-
-        # Create the output variable.
-        # var = add_variable(nc_out, out_var_name, Float32, dimnames(in_var))
-        # defVar(nc_out, name(in_lon), in_lon[:], dimnames(in_lon))
-        var = defVar(nc_out, out_var_name, Float32, dimnames(in_var),
-                     deflatelevel=compression_level,
-                     shuffle=compression_level > 0,
-                     chunksizes=chunk_sizes)
-        copy_attributes(in_var, var)
-        var.attrib[ATTR_UNITS] = units
     end
 end
 
 # Convenience function for when the output variable name is the same as the
 # input variable name.
-function init_outfile(path::String, nc_in::NCDataset, var_name::String,
-                      compression_level::Int, chunk_sizes::Vector{Int},
-                      units::String)
-    init_outfile(path, nc_in, var_name, var_name, compression_level,
-                 chunk_sizes, units)
-end
+function create_var_from_existing(path::String, idx_in::DimensionIndices,
+                                  compression_level::Int, units::String,
+                                  sizes::ChunkSizes)
+    var = idx_in.var
+    std_name = var.attrib[ATTR_STD_NAME]
+    long_name = var.attrib[ATTR_LONG_NAME]
+    dims = [dimnames(var)...]
+    chunk_sizes = get_chunk_size(idx_in, sizes)
 
-function init_outfile(path::String, var_name::String, units::String,
-                      std_name::String, long_name::String,
-                      dims::Vector{String},
-                      compression_level::Int,
-                      chunk_sizes::Vector{Int})
-    NCDataset(path, "a") do nc
-        var = defVar(nc, var_name, Float32, dims,
-               deflatelevel=compression_level,
-               shuffle=compression_level > 0,
-               chunksizes=chunk_sizes)
-
-        var.attrib[ATTR_UNITS] = units
-        var.attrib[ATTR_STD_NAME] = std_name
-        var.attrib[ATTR_LONG_NAME] = long_name
-    end
+    create_var(path, name(var), units, std_name, long_name, dims,
+               compression_level, chunk_sizes)
 end
 
 function create_outfile(nc_in::NCDataset, nc_out::NCDataset, opts::Options)
@@ -784,8 +790,9 @@ function create_outfile(nc_in::NCDataset, nc_out::NCDataset, opts::Options)
 
     # Create longitude variable in the output file.
     out_lon = defVar(nc_out, name(in_lon), lons, dimnames(in_lon),
-                        deflatelevel=compression, shuffle=shuffle,
-                        chunksizes=[chunk_size_lon])
+                     deflatelevel=compression, shuffle=shuffle,
+                     chunksizes=[chunk_size_lon],
+                     fillvalue=fillvalue(typeof(lons[1])))
     copy_attributes(in_lon, out_lon)
 
     # Get the size of each latitude value in bytes.
@@ -800,13 +807,17 @@ function create_outfile(nc_in::NCDataset, nc_out::NCDataset, opts::Options)
     # Create latitude variable in the output file.
     out_lat = defVar(nc_out, name(in_lat), lats, dimnames(in_lat),
                         deflatelevel=compression, shuffle=shuffle,
-                        chunksizes=[chunk_size_lat])
+                        chunksizes=[chunk_size_lat],
+                        fillvalue=fillvalue(typeof(lats[1])))
     copy_attributes(in_lat, out_lat)
 
     # Construct hourly timeseries from each day in the input time
     # variable.
     times = in_time[:]
     hours = [t + Hour(h) for t in times for h in 0:(DAY_LENGTH - 1)]
+
+    # Not writing a fill value attribute for time, since there should be no
+    # missing values.
     out_time = defVar(nc_out, name(in_time), hours, dimnames(in_time),
                         attrib = OrderedDict(
                             ATTR_UNITS => in_time.attrib[ATTR_UNITS],
@@ -817,7 +828,7 @@ function create_outfile(nc_in::NCDataset, nc_out::NCDataset, opts::Options)
     copy_attributes(in_time, out_time)
 end
 
-function init_outfiles(opts::Options, nc_in::NCDataset)
+function create_output_files(opts::Options, nc_in::NCDataset)
     paths = unique([opts.out_temp, opts.out_rs, opts.out_pr, opts.out_ps,
                     opts.out_vpd])
     for path in paths
@@ -833,11 +844,11 @@ function init_outfiles(opts::Options, nc_in::NCDataset)
     end
 end
 
-function get_chunk_size(indices::DimensionIndices, opts::Options)
+function get_chunk_size(order::DimensionIndices, sizes::ChunkSizes)::Vector{Int}
     chunks = [1, 1, 1]
-    chunks[indices.index_time] = opts.chunk_size_time
-    chunks[indices.index_lat] = opts.chunk_size_lat
-    chunks[indices.index_lon] = opts.chunk_size_lon
+    chunks[order.index_time] = sizes.time
+    chunks[order.index_lat] = sizes.lat
+    chunks[order.index_lon] = sizes.lon
     return chunks
 end
 
@@ -889,20 +900,12 @@ function get_workload(opts::Options,
     return ([], [])
 end
 
-function generate_weather(opts::Options, indices::DimensionOrders,
-                          writers::Writers, dynamic_ps::Bool)
-    idx_tmin = indices.idx_tmin
-    idx_tmax = indices.idx_tmax
-    idx_rs = indices.idx_rs
-    idx_pr = indices.idx_pr
-    idx_ps = indices.idx_ps
-    idx_temp = indices.idx_temp
-    idx_vpd = indices.idx_vpd
-
+function generate_weather(opts::Options, indices_in::InputDimensionOrders,
+                          indices_out::OutputDimensionOrders)
     # Iterate through gridcells. (All input files use the same grid.)
-    var_lon = var_from_std_name(idx_tmin.var.var.ds, STD_LON)
-    var_lat = var_from_std_name(idx_tmin.var.var.ds, STD_LAT)
-    var_time = var_from_std_name(idx_tmin.var.var.ds, STD_TIME)
+    var_lon = var_from_std_name(indices_in.idx_tmin.var.var.ds, STD_LON)
+    var_lat = var_from_std_name(indices_in.idx_tmin.var.var.ds, STD_LAT)
+    var_time = var_from_std_name(indices_in.idx_tmin.var.var.ds, STD_TIME)
 
     lons = var_lon[:]
     lats = var_lat[:]
@@ -922,14 +925,14 @@ function generate_weather(opts::Options, indices::DimensionOrders,
             @info "Processing gridcell $i, $j ($lat, $lon)"
 
             # Read timeseries for this gridcell.
-            tmin_data = read_variable(idx_tmin.var, idx_tmin, i, j, "degC")
-            tmax_data = read_variable(idx_tmax.var, idx_tmax, i, j, "degC")
-            rs_data = read_variable(idx_rs.var, idx_rs, i, j, "W m-2")
-            pr_data = read_variable(idx_pr.var, idx_pr, i, j, "mm")
-            if dynamic_ps
-                ps_data = read_variable(idx_ps.var, idx_ps, i, j, "Pa")
-            else
+            tmin_data = read(indices_in.idx_tmin, i, j, REQ_UNITS_TEMP)
+            tmax_data = read(indices_in.idx_tmax, i, j, REQ_UNITS_TEMP)
+            rs_data = read(indices_in.idx_rs, i, j, REQ_UNITS_RS)
+            pr_data = read(indices_in.idx_pr, i, j, REQ_UNITS_PR)
+            if indices_in.idx_ps === nothing
                 ps_data = fill(opts.default_ps, length(times))
+            else
+                ps_data = read(indices_in.idx_ps, i, j, REQ_UNITS_PS)
             end
 
             tair_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
@@ -995,13 +998,66 @@ function generate_weather(opts::Options, indices::DimensionOrders,
             vpd_out /= 1000
 
             # Write data for this gridcell to the output files.
-            write_outputs(writers.tair, tair_out, i, j, idx_temp)
-            write_outputs(writers.vpd, vpd_out, i, j, idx_vpd)
-            write_outputs(writers.rs, rs_out, i, j, idx_rs)
-            write_outputs(writers.pr, pr_out, i, j, idx_pr)
-            write_outputs(writers.ps, ps_out, i, j, idx_ps)
+            write(indices_out.idx_temp, tair_out, i, j)
+            write(indices_out.idx_vpd, vpd_out, i, j)
+            write(indices_out.idx_rs, rs_out, i, j)
+            write(indices_out.idx_pr, pr_out, i, j)
+            write(indices_out.idx_ps, ps_out, i, j)
         end # iteration through lons
     end # iteration through lats
+end
+
+function initialise_output_files(opts::Options, idx_in::InputDimensionOrders)
+    # Get a reference to the tmin dataset. This will be useful as a template.
+    tmin = idx_in.idx_tmin.var.var.ds
+
+    # Create output files with coordinate variables.
+    create_output_files(opts, tmin)
+
+    # User-specified output chunk sizes.
+    sizes = ChunkSizes(opts.chunk_size_lon, opts.chunk_size_lat,
+                       opts.chunk_size_time)
+
+    # Initialise data variables in output files.
+    idx_rs = idx_in.idx_rs
+    create_var_from_existing(opts.out_rs, idx_rs, opts.compression_level,
+                             UNITS_RS, sizes)
+
+    idx_pr = idx_in.idx_pr
+    create_var_from_existing(opts.out_pr, idx_pr, opts.compression_level,
+                             UNITS_PR, sizes)
+
+    # Default dimension order for created-from-scratch variables can be taken
+    # from tmin input file.
+    dim_order_default = [dimnames(tmin[opts.name_tmin])...]
+    chunk_size_default = get_chunk_size(idx_in.idx_tmin, sizes)
+
+    # Create air temperature variable.
+    create_var(opts.out_temp, opts.out_name_temp, UNITS_TEMP, STD_TEMP,
+               LONG_TEMP, dim_order_default, opts.compression_level,
+               chunk_size_default)
+
+    # Create VPD variable.
+    create_var(opts.out_vpd, opts.out_name_vpd, UNITS_VPD, STD_VPD, LONG_VPD,
+               dim_order_default, opts.compression_level,
+               chunk_size_default)
+
+    # Air pressure can use same dimension order and suitable chunk sizes as
+    # input file (if one is provided). Otherwise, use defaults based on tmin
+    # input file.
+    dims_ps = dim_order_default
+    chunks_ps = chunk_size_default
+    if idx_in.idx_ps === nothing
+        @info "Using fixed air pressure = $(opts.default_ps) $(UNITS_PS)"
+    else
+        idx_ps = idx_in.idx_ps
+        dims_ps = [dimnames(idx_ps.var)...]
+        chunks_ps = get_chunk_size(idx_ps, sizes)
+    end
+
+    # Create air pressure variable.
+    create_var(opts.out_ps, NAME_PS, UNITS_PS, STD_PS, LONG_PS,
+               dims_ps, opts.compression_level, chunks_ps)
 end
 
 function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset,
@@ -1018,63 +1074,30 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset,
     idx_pr = validate_variable_from_std_name(pr, STD_PR)
     dynamic_ps = has_var_with_std_name(ps, STD_PS)
 
+    idx_ps = nothing
     if dynamic_ps
         idx_ps = validate_variable_from_std_name(ps, STD_PS)
-    else
-        idx_ps = idx_tmin
     end
 
-    # Create output files with coordinate variables.
-    init_outfiles(opts, tmin)
-
-    # Initialise data variables in output files.
-    # path::String, nc_in::NCDataset, out_var_name::String, in_var_name::String
-    init_outfile(opts.out_rs, rs, name(idx_rs.var), opts.compression_level,
-                 get_chunk_size(idx_rs, opts), UNITS_RS)
-    init_outfile(opts.out_pr, pr, name(idx_pr.var), opts.compression_level,
-                 get_chunk_size(idx_pr, opts), UNITS_PR)
-
-    if dynamic_ps
-        init_outfile(opts.out_ps, ps, name(idx_ps.var), opts.compression_level,
-                    get_chunk_size(idx_ps, opts), UNITS_PS)
-        ps_var = name(idx_ps.var)
-    else
-        @info "Using fixed air pressure = $(opts.default_ps) $(UNITS_PS)"
-        init_outfile(opts.out_ps, NAME_PS, UNITS_PS, STD_PS, LONG_PS,
-                     [dimnames(tmin[opts.name_tmin])...],
-                     opts.compression_level, get_chunk_size(idx_tmin, opts))
-        ps_var = NAME_PS
-    end
-
-    # Temperature can be created by copying metadata from tmin input file.
-    init_outfile(opts.out_temp, tmin, opts.out_name_temp, opts.name_tmin,
-                 opts.compression_level, get_chunk_size(idx_tmin, opts),
-                 UNITS_TEMP)
-    idx_temp = idx_tmin # same dimension order as tmin
-
-    # VPD must be created from scratch. We can use same dimension order as tmin
-    # input file.
-    init_outfile(opts.out_vpd, opts.out_name_vpd,
-                 [dimnames(tmin[opts.name_tmin])...],
-                 UNITS_VPD, "vapour_pressure_deficit", "Vapour pressure deficit",
-                 opts.compression_level, get_chunk_size(idx_tmin, opts))
-    idx_vpd = idx_tmin # same dimension order as tmin
-
-    dim_order = DimensionOrders(idx_tmin, idx_tmax, idx_rs, idx_pr, idx_ps,
-                                idx_temp, idx_vpd)
+    idx_in = InputDimensionOrders(idx_tmin, idx_tmax, idx_rs, idx_pr, idx_ps)
+    initialise_output_files(opts, idx_in)
 
     NCDataset(opts.out_temp, "a") do nc_out_temp
-        out_temp = nc_out_temp[opts.out_name_temp]
+        idx_temp = validate_variable_from_std_name(nc_out_temp, STD_TEMP)
         NCDataset(opts.out_vpd, "a") do nc_out_vpd
-            out_vpd = nc_out_vpd[opts.out_name_vpd]
+            idx_vpd = validate_variable_from_std_name(nc_out_vpd, STD_VPD)
             NCDataset(opts.out_rs, "a") do nc_out_rs
-                out_rs = nc_out_rs[name(idx_rs.var)]
+                idx_rs_out = validate_variable_from_std_name(nc_out_rs, STD_RS)
                 NCDataset(opts.out_pr, "a") do nc_out_pr
-                    out_pr = nc_out_pr[name(idx_pr.var)]
+                    idx_pr_out = validate_variable_from_std_name(nc_out_pr,
+                                                                 STD_PR)
                     NCDataset(opts.out_ps, "a") do nc_out_ps
-                        out_ps = nc_out_ps[name(idx_ps.var)]
-                        writers = Writers(out_temp, out_vpd, out_rs, out_pr, out_ps)
-                        generate_weather(opts, dim_order, writers, dynamic_ps)
+                        idx_ps_out = validate_variable_from_std_name(nc_out_ps,
+                                                                     STD_PS)
+                        idx_out = OutputDimensionOrders(
+                            idx_rs_out, idx_pr_out, idx_temp, idx_vpd,
+                            idx_ps_out)
+                        generate_weather(opts, idx_in, idx_out)
                     end
                 end
             end
