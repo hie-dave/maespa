@@ -1127,31 +1127,38 @@ function main(opts::Options)
     end
 end
 
-opts = parse_cli()
+# Main CLI entrypoint function. Initialises logging and MPI, and runs the
+# generator. Does not swallow exceptions.
+function cli_main(opts::Options)
+    logger = ConsoleLogger(stdout, opts.log_level)
+    global_logger(logger)
 
-logger = ConsoleLogger(stdout, opts.log_level)
-global_logger(logger)
+    if opts.parallel
+        @eval using MPI
+        MPI.Init()
+        if get_world_size() == 1
+            @warn "MPI parallelism enabled but only one process detected; running in serial. This is almost certainly not what you want. To fix, run with multiple processes (e.g. using mpirun)."
+        end
 
-if opts.parallel
-    @eval using MPI
-    MPI.Init()
-    if get_world_size() == 1
-        @warn "MPI parallelism enabled but only one process detected; running in serial. This is almost certainly not what you want. To fix, run with multiple processes (e.g. using mpirun)."
+        @info "Running on rank $(get_rank()) of $(get_world_size())"
     end
 
-    @info "Running on rank $(get_rank()) of $(get_world_size())"
+    try
+        main(opts)
+        if opts.parallel && MPI.Initialized() && !MPI.Finalized()
+            MPI.Finalize()
+        end
+    catch err
+        if opts.parallel
+            @error "Error on rank $(get_rank()): $err"
+            Base.display_error(err, catch_backtrace())
+            MPI.Abort(MPI.COMM_WORLD, 1)
+        end
+        rethrow()
+    end
 end
 
-try
-    main(opts)
-    if opts.parallel && MPI.Initialized() && !MPI.Finalized()
-        MPI.Finalize()
-    end
-catch err
-    if opts.parallel
-        @error "Error on rank $(get_rank()): $err"
-        Base.display_error(err, catch_backtrace())
-        MPI.Abort(MPI.COMM_WORLD, 1)
-    end
-    rethrow()
+if abspath(PROGRAM_FILE) == @__FILE__
+    opts = parse_cli()
+    cli_main(opts)
 end
