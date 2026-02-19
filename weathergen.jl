@@ -20,6 +20,7 @@ using Logging
 using NCDatasets
 using Dates
 using DataStructures
+using MPI
 
 ################################################################################
 # Includes
@@ -659,10 +660,40 @@ function validate_variable_from_std_name(nc::NCDataset,
     return validate_variable(nc, var)
 end
 
-function read(indices::DimensionIndices, i::Int, j::Int, units::String)
-    hyperslab = selectdim(indices.var, indices.index_lat, i)
-    hyperslab = selectdim(hyperslab, indices.index_lon, j)
-    data = hyperslab[:]
+function hyperslab(indices::DimensionIndices, i::Int, j::Int, k::Int)
+    ndim = length(indices.var.var.dimids)
+    @assert ndim == 3
+
+    # C-style indexing: start at 0.
+    start = zeros(Int, ndim)
+    count = ones(Int, ndim)
+    stride = ones(Int, ndim)
+
+    # i-1, j-1 for C-style indexing.
+    start[indices.index_lat] = i - 1
+    start[indices.index_lon] = j - 1
+    start[indices.index_time] = 0
+    count[indices.index_time] = k
+
+    # C-style ordering for the netcdf API.
+    return reverse(start), reverse(count), reverse(stride)
+end
+
+function read_raw(indices::DimensionIndices, i::Int, j::Int, ntime::Int)
+    v = indices.var.var
+    std_name = get(v.attrib, ATTR_STD_NAME, "unknown")
+    @debug "Reading $ntime values of variable $(v.varid) ($std_name) at gridcell ($i, $j)"
+
+    start, count, stride = hyperslab(indices, i, j, ntime)
+    data = Vector{eltype(v)}(undef, ntime)
+
+    NCDatasets.nc_get_vars!(v.ds.ncid, v.varid, start, count, stride, data)
+    @debug "Successfully read $(length(data)) values for variable $(v.varid) ($std_name) at gridcell ($i, $j)"
+    return data
+end
+
+function read(indices::DimensionIndices, i::Int, j::Int, units::String, dt::Int, ntime::Int)
+    data = read_raw(indices, i, j, ntime)
 
     # Error if any data is missing.
     if any(ismissing, data)
@@ -672,12 +703,7 @@ function read(indices::DimensionIndices, i::Int, j::Int, units::String)
     # Convert from Vector{Union{Float32, Missing}} to Vector{Float32}.
     data = convert(Vector{Float32}, data)
 
-    # Get timestep width in seconds.
-    time = var_from_std_name(indices.var.var.ds, STD_TIME)
-    # TODO: more robust time delta handling.
-    dt = Second(Dates.value(time[2] - time[1]) / 1000)
-
-    return convert_units(data, indices.var.attrib[ATTR_UNITS], units, dt.value)
+    return convert_units(data, indices.var.attrib[ATTR_UNITS], units, dt)
 end
 
 """Convert a `DateTime` to Maespa's `idate` (days since 1950-01-01).
@@ -697,7 +723,7 @@ function date_to_idate(date::DateTime)
     ifd = (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
 
     dayOfYear = ifd[monthValue] + dayValue
-    isLeapYear = (4 * (yearValue ÷ 4) == yearValue)
+    isLeapYear = (4 * (yearValue / 4) == yearValue)
     if isLeapYear && monthValue >= 3
         dayOfYear += 1
     end
@@ -708,11 +734,20 @@ function date_to_idate(date::DateTime)
     return daysBeforeYear + dayOfYear - 1
 end
 
-function write(indices::DimensionIndices, data::Vector{Float32},
-               ilat::Int, ilon::Int)
-    hyperslab = selectdim(indices.var, indices.index_lat, ilat)
-    hyperslab = selectdim(hyperslab, indices.index_lon, ilon)
-    hyperslab[:] = data
+function write(indices::DimensionIndices, data::Vector{Float32}, i::Int, j::Int)
+    v = indices.var.var
+    start, count, stride = hyperslab(indices, i, j, length(data))
+
+    std_name = get(v.attrib, ATTR_STD_NAME, "unknown")
+    @debug "Writing $(length(data)) values of variable $(v.varid) ($std_name) at gridcell ($i, $j)"
+
+    NCDatasets.nc_put_vars(v.ds.ncid, v.varid, start, count, stride, data)
+end
+
+function barrier(message::AbstractString)
+    @debug "Entering MPI barrier: $message"
+    MPI.Barrier(MPI.COMM_WORLD)
+    @debug "Exiting MPI barrier: $message"
 end
 
 const NcAttribContainer = Union{NCDataset, NCDatasets.CFVariable}
@@ -891,21 +926,45 @@ function mix64(seed::Int, lat::Float32, lon::Float32)::UInt64
                  reinterpret(UInt64, Float64(lon)))
 end
 
-function get_workload(opts::Options,
-                      var_lat::NCDatasets.CFVariable,
-                      var_lon::NCDatasets.CFVariable)::Tuple{UnitRange{Int}, UnitRange{Int}}
-    lats = var_lat[:]
-    lons = var_lon[:]
+function get_partition(total::Int, world_size::Int, rank::Int)::UnitRange{Int}
+    # Partition a 1D index space into contiguous blocks, distributed as evenly
+    # as possible across ranks.
+    base = total ÷ world_size
+    extra = total % world_size
 
-    # If running in serial mode, return all latitudes and longitudes.
-    if !opts.parallel
-        return (eachindex(lats), eachindex(lons))
+    count = base + (rank < extra ? 1 : 0)
+    start = rank * base + min(rank, extra) + 1
+
+    if count == 0
+        return 1:0
     end
 
-    # TODO: implement spatial workload partitioning for parallel mode. For now,
-    # just return empty ranges, which will cause the main loop to be skipped in
-    # parallel mode.
-    return ([], [])
+    return start:(start + count - 1)
+end
+
+function get_workload(opts::Options,
+                      nlat::Int,
+                      nlon::Int)::AbstractUnitRange{Int}
+    ncells = nlat * nlon
+
+    # If running in serial mode, return all gridcells.
+    if !opts.parallel
+        return 1:ncells
+    end
+
+    return get_partition(ncells, get_world_size(), get_rank())
+end
+
+function get_max_workload_size(opts::Options,
+                               nlat::Int,
+                               nlon::Int)
+    ncells = nlat * nlon
+
+    if !opts.parallel
+        return ncells
+    end
+
+    return cld(ncells, get_world_size())
 end
 
 function generate_weather(opts::Options, indices_in::InputDimensionOrders,
@@ -919,131 +978,189 @@ function generate_weather(opts::Options, indices_in::InputDimensionOrders,
     lats = var_lat[:]
     times = var_time[:]
 
-    (ilats, ilons) = get_workload(opts, var_lat, var_lon)
+    # Get timestep width in seconds.
+    # TODO: more robust time delta handling.
+    dt = Second(Dates.value(times[2] - times[1]) / 1000).value
+
+    workitems = get_workload(opts, length(lats), length(lons))
+    workload_size = length(workitems)
+    if opts.parallel
+        if workload_size == 0
+            @info "Workload contains 0 gridcells"
+        else
+            nlon = length(lons)
+            first_cell = first(workitems)
+            last_cell = last(workitems)
+            first_i = ((first_cell - 1) ÷ nlon) + 1
+            first_j = ((first_cell - 1) % nlon) + 1
+            last_i = ((last_cell - 1) ÷ nlon) + 1
+            last_j = ((last_cell - 1) % nlon) + 1
+            @info "Workload contains $workload_size gridcells (cell range $first_cell:$last_cell, first ($first_i,$first_j), last ($last_i,$last_j))"
+        end
+    else
+        @info "Processing $workload_size gridcells"
+    end
 
     # Iterate through gridcells. Generate climate one gridcell at a time.
-    for i in ilats
-        for j in ilons
-            lat = lats[i]
-            lon = lons[j]
+    nlon = length(lons)
+    ntime = length(times)
+    for cell in workitems
+        i = ((cell - 1) ÷ nlon) + 1
+        j = ((cell - 1) % nlon) + 1
 
-            # Initialise PRNG seed.
-            wg_seed(mix64(opts.seed, lat, lon))
+        lat = lats[i]
+        lon = lons[j]
 
-            @info "Processing gridcell $i, $j ($lat, $lon)"
+        # Initialise PRNG seed.
+        wg_seed(mix64(opts.seed, lat, lon))
 
-            # Read timeseries for this gridcell.
-            tmin_data = read(indices_in.idx_tmin, i, j, REQ_UNITS_TEMP)
-            tmax_data = read(indices_in.idx_tmax, i, j, REQ_UNITS_TEMP)
-            rs_data = read(indices_in.idx_rs, i, j, REQ_UNITS_RS)
-            pr_data = read(indices_in.idx_pr, i, j, REQ_UNITS_PR)
-            if indices_in.idx_ps === nothing
-                ps_data = fill(opts.default_ps, length(times))
-            else
-                ps_data = read(indices_in.idx_ps, i, j, REQ_UNITS_PS)
-            end
+        @info "Processing gridcell $i, $j ($lat, $lon)"
 
-            tair_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
-            vpd_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
-            rs_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
-            pr_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
-            ps_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
+        # Read timeseries for this gridcell.
+        tmin_data = read(indices_in.idx_tmin, i, j, UNITS_TEMP, dt, ntime)
+        tmax_data = read(indices_in.idx_tmax, i, j, UNITS_TEMP, dt, ntime)
+        rs_data = read(indices_in.idx_rs, i, j, UNITS_RS, dt, ntime)
+        pr_data = read(indices_in.idx_pr, i, j, UNITS_PR, dt, ntime)
+        if indices_in.idx_ps === nothing
+            ps_data = fill(opts.default_ps, length(times))
+        else
+            ps_data = read(indices_in.idx_ps, i, j, UNITS_PS, dt, ntime)
+        end
 
-            # Define daily arrays for the outputs we don't care about. These
-            # will just be overwritten each day.
-            tsoil_out = Vector{Float32}(undef, DAY_LENGTH)
-            rh_out = Vector{Float32}(undef, DAY_LENGTH)
-            vmfd_out = Vector{Float32}(undef, DAY_LENGTH)
-            radabv_out = Vector{Float32}(undef, DAY_LENGTH * 3)
-            fbeam_out = Vector{Float32}(undef, DAY_LENGTH * 3)
+        tair_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
+        vpd_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
+        rs_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
+        pr_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
+        ps_out = Vector{Float32}(undef, DAY_LENGTH * length(times))
 
-            # wg_generate_day() operates at the day level, so we need to iterate
-            # over the days in the input file.
-            for k in eachindex(times)
-                @debug "Generating climate for day: $(times[k])"
+        # Define daily arrays for the outputs we don't care about. These
+        # will just be overwritten each day.
+        tsoil_out = Vector{Float32}(undef, DAY_LENGTH)
+        rh_out = Vector{Float32}(undef, DAY_LENGTH)
+        vmfd_out = Vector{Float32}(undef, DAY_LENGTH)
+        radabv_out = Vector{Float32}(undef, DAY_LENGTH * 3)
+        fbeam_out = Vector{Float32}(undef, DAY_LENGTH * 3)
 
-                # idate: days since 1950
-                idate = date_to_idate(times[k])
-                # alat: latitude in radians
-                alat = deg2rad(lat)
+        # wg_generate_day() operates at the day level, so we need to iterate
+        # over the days in the input file.
+        for k in eachindex(times)
+            # @debug "Generating climate for day: $(times[k])"
 
-                # Compute offset into output arrays.
-                start = (k - 1) * DAY_LENGTH + 1
+            # idate: days since 1950
+            idate = date_to_idate(times[k])
+            # alat: latitude in radians
+            alat = deg2rad(lat)
 
-                # Get pointers to today's data in the long output arrays.
-                GC.@preserve tair_out vpd_out rs_out pr_out ps_out tsoil_out rh_out vmfd_out radabv_out fbeam_out begin
+            # Compute offset into output arrays.
+            start = (k - 1) * DAY_LENGTH + 1
 
-                    tair_day = pointer(tair_out, start)
-                    vpd_day = pointer(vpd_out, start)
-                    pr_day = pointer(pr_out, start)
-                    ps_day = pointer(ps_out, start)
+            # Get pointers to today's data in the long output arrays.
+            GC.@preserve tair_out vpd_out rs_out pr_out ps_out tsoil_out rh_out vmfd_out radabv_out fbeam_out begin
 
-                    tsoil_day = pointer(tsoil_out, 1)
-                    rh_day = pointer(rh_out, 1)
-                    vmfd_day = pointer(vmfd_out, 1)
-                    radabv_day = pointer(radabv_out, 1)
-                    fbeam_day = pointer(fbeam_out, 1)
+                tair_day = pointer(tair_out, start)
+                vpd_day = pointer(vpd_out, start)
+                pr_day = pointer(pr_out, start)
+                ps_day = pointer(ps_out, start)
 
-                    # Call the weather generator.
-                    wg_generate_day(idate, alat, tmin_data[k], tmax_data[k],
-                                    rs_data[k], pr_data[k],
-                                    ps_data[k], DAY_LENGTH, tair_day,
-                                    tsoil_day, rh_day, vpd_day, vmfd_day,
-                                    radabv_day, fbeam_day, pr_day,
-                                    ps_day)
+                tsoil_day = pointer(tsoil_out, 1)
+                rh_day = pointer(rh_out, 1)
+                vmfd_day = pointer(vmfd_out, 1)
+                radabv_day = pointer(radabv_out, 1)
+                fbeam_day = pointer(fbeam_out, 1)
 
-                    # rs output is the sum of the PAR and NIR components of
-                    # radabv_day. radabv is a 3-column matrix flattened to a
-                    # column-major buffer.
-                    for ihr in 1:DAY_LENGTH
-                        rs_out[start + ihr - 1] = radabv_out[ihr] +
-                                                  radabv_out[ihr + DAY_LENGTH]
-                    end
+                # Call the weather generator.
+                wg_generate_day(idate, alat, tmin_data[k], tmax_data[k],
+                                rs_data[k], pr_data[k],
+                                ps_data[k], DAY_LENGTH, tair_day,
+                                tsoil_day, rh_day, vpd_day, vmfd_day,
+                                radabv_day, fbeam_day, pr_day,
+                                ps_day)
+
+                # rs output is the sum of the PAR and NIR components of
+                # radabv_day. radabv is a 3-column matrix flattened to a
+                # column-major buffer.
+                for ihr in 1:DAY_LENGTH
+                    rs_out[start + ihr - 1] = radabv_out[ihr] +
+                                              radabv_out[ihr + DAY_LENGTH]
                 end
-            end # iteration through times
+            end
+        end # iteration through times
+        @debug "Successfully generated entire timeseries for gridcell ($i, $j)"
 
-            # Convert VPD from Pa to kPa.
-            vpd_out /= 1000
+        # Convert VPD from Pa to kPa.
+        vpd_out /= 1000
 
-            # Write data for this gridcell to the output files.
-            write(indices_out.idx_temp, tair_out, i, j)
-            write(indices_out.idx_vpd, vpd_out, i, j)
-            write(indices_out.idx_rs, rs_out, i, j)
-            write(indices_out.idx_pr, pr_out, i, j)
-            write(indices_out.idx_ps, ps_out, i, j)
-        end # iteration through lons
-    end # iteration through lats
+        # Write data for this gridcell to the output files.
+        write(indices_out.idx_temp, tair_out, i, j)
+        write(indices_out.idx_vpd, vpd_out, i, j)
+        write(indices_out.idx_rs, rs_out, i, j)
+        write(indices_out.idx_pr, pr_out, i, j)
+        write(indices_out.idx_ps, ps_out, i, j)
+    end # iteration through assigned gridcells
+
+    if !opts.parallel
+        return
+    end
+
+    # Perform busy wait consisting of zero-length reads and writes that mimics
+    # the access patterns of the remaining workers.
+    # Number of iterations is max workload size - workload size of this worker.
+    niter = get_max_workload_size(opts, length(lats), length(lons)) - workload_size
+    @info "Performing busy wait for $niter iterations to allow other workers to finish"
+    for _ in 1:niter
+        # For each gridcell, a real worker reads the entire timeseries of
+        # tmin, tmax, rs, pr, and conditionally, ps. Use full-shape reads
+        # here so all workers participate in matching collective operations.
+
+        read_raw(indices_in.idx_tmin, 1, 1, 0)
+        read_raw(indices_in.idx_tmax, 1, 1, 0)
+        read_raw(indices_in.idx_rs, 1, 1, 0)
+        read_raw(indices_in.idx_pr, 1, 1, 0)
+        if indices_in.idx_ps !== nothing
+            read_raw(indices_in.idx_ps, 1, 1, 0)
+        end
+
+        write(indices_out.idx_temp, Float32[], 1, 1)
+        write(indices_out.idx_vpd, Float32[], 1, 1)
+        write(indices_out.idx_rs, Float32[], 1, 1)
+        write(indices_out.idx_pr, Float32[], 1, 1)
+        write(indices_out.idx_ps, Float32[], 1, 1)
+    end
 end
 
-function initialise_output_files(opts::Options, idx_in::InputDimensionOrders)
+function initialise_output_files(opts::Options)
     if opts.parallel && get_rank() != 0
         # Only the master node should create output files, to avoid conflicts.
         return
     end
 
-    # Get a reference to the tmin dataset. This will be useful as a template.
-    tmin = idx_in.idx_tmin.var.var.ds
-
-    # Create output files with coordinate variables.
-    create_output_files(opts, tmin)
-
     # User-specified output chunk sizes.
     sizes = ChunkSizes(opts.chunk_size_lon, opts.chunk_size_lat,
                        opts.chunk_size_time)
 
+    # Get a reference to the tmin dataset. This will be useful as a template.
+    dim_order_default, chunk_size_default = NCDataset(opts.in_tmin) do tmin
+        # Create output files with coordinate variables.
+        create_output_files(opts, tmin)
+
+        # Default dimension order for created-from-scratch variables can be taken
+        # from tmin input file.
+        idx_tmin = validate_variable_from_name(tmin, opts.name_tmin)
+        ([dimnames(tmin[opts.name_tmin])...], get_chunk_size(idx_tmin, sizes))
+    end
+
     # Initialise data variables in output files.
-    idx_rs = idx_in.idx_rs
-    create_var_from_existing(opts.out_rs, idx_rs, opts.compression_level,
-                             UNITS_RS, sizes)
+    NCDataset(opts.in_rs) do nc_rs
+        idx_rs = validate_variable_from_std_name(nc_rs, STD_RS)
+        create_var_from_existing(opts.out_rs, idx_rs, opts.compression_level,
+                                 UNITS_RS, sizes)
+    end
 
-    idx_pr = idx_in.idx_pr
-    create_var_from_existing(opts.out_pr, idx_pr, opts.compression_level,
-                             UNITS_PR, sizes)
-
-    # Default dimension order for created-from-scratch variables can be taken
-    # from tmin input file.
-    dim_order_default = [dimnames(tmin[opts.name_tmin])...]
-    chunk_size_default = get_chunk_size(idx_in.idx_tmin, sizes)
+    NCDataset(opts.in_pr) do nc_pr
+        idx_pr = validate_variable_from_std_name(nc_pr, STD_PR)
+        create_var_from_existing(opts.out_pr, idx_pr, opts.compression_level,
+                                 UNITS_PR, sizes)
+    end
 
     # Create air temperature variable.
     create_var(opts.out_temp, opts.out_name_temp, UNITS_TEMP, STD_TEMP,
@@ -1058,14 +1175,14 @@ function initialise_output_files(opts::Options, idx_in::InputDimensionOrders)
     # Air pressure can use same dimension order and suitable chunk sizes as
     # input file (if one is provided). Otherwise, use defaults based on tmin
     # input file.
-    dims_ps = dim_order_default
-    chunks_ps = chunk_size_default
-    if idx_in.idx_ps === nothing
-        @info "Using fixed air pressure = $(opts.default_ps) $(UNITS_PS)"
-    else
-        idx_ps = idx_in.idx_ps
-        dims_ps = [dimnames(idx_ps.var)...]
-        chunks_ps = get_chunk_size(idx_ps, sizes)
+    dims_ps, chunks_ps = NCDataset(opts.in_ps) do nc_ps
+        if has_var_with_std_name(nc_ps, STD_PS)
+            idx_ps = validate_variable_from_std_name(nc_ps, STD_PS)
+            ([dimnames(idx_ps.var)...], get_chunk_size(idx_ps, sizes))
+        else
+            @info "Using fixed air pressure = $(opts.default_ps) $(UNITS_PS)"
+            (dim_order_default, chunk_size_default)
+        end
     end
 
     # Create air pressure variable.
@@ -1075,16 +1192,46 @@ end
 
 function open_netcdf(f::Function, path::AbstractString, mode::AbstractString,
                      opts::Options)
-    nc = NCDataset(path, mode)
+    open() = begin
+        if opts.parallel
+            return NCDataset(MPI.COMM_WORLD, path, mode)
+        else
+            return NCDataset(path, mode)
+        end
+    end
+    nc = open()
     if opts.parallel
+        @info "Setting collective access mode for file $(NCDatasets.path(nc))"
         NCDatasets.paraccess(nc, :collective)
     end
+
+    @debug "Successfully opened path $(path): ncid=$(nc.ncid)"
 
     try
         return f(nc)
     finally
         close(nc)
     end
+end
+
+function with_open_netcdfs(f::Function, paths::Vector{String},
+                           mode::AbstractString, opts::Options)
+    unique_paths = unique(paths)
+    datasets = Dict{String, NCDataset}()
+
+    function open_next(i::Int)
+        if i > length(unique_paths)
+            return f(datasets)
+        end
+
+        path = unique_paths[i]
+        open_netcdf(path, mode, opts) do nc
+            datasets[path] = nc
+            return open_next(i + 1)
+        end
+    end
+
+    return open_next(1)
 end
 
 function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset,
@@ -1107,62 +1254,88 @@ function process_data(opts::Options, tmin::NCDataset, tmax::NCDataset,
     end
 
     idx_in = InputDimensionOrders(idx_tmin, idx_tmax, idx_rs, idx_pr, idx_ps)
-    initialise_output_files(opts, idx_in)
 
-    open_netcdf(opts.out_temp, "a", opts) do nc_out_temp
+    with_open_netcdfs([opts.out_temp, opts.out_vpd, opts.out_rs, opts.out_pr,
+                       opts.out_ps], "a", opts) do out_datasets
+        nc_out_temp = out_datasets[opts.out_temp]
+        nc_out_vpd = out_datasets[opts.out_vpd]
+        nc_out_rs = out_datasets[opts.out_rs]
+        nc_out_pr = out_datasets[opts.out_pr]
+        nc_out_ps = out_datasets[opts.out_ps]
+
         idx_temp = validate_variable_from_std_name(nc_out_temp, STD_TEMP)
-        open_netcdf(opts.out_vpd, "a", opts) do nc_out_vpd
-            idx_vpd = validate_variable_from_std_name(nc_out_vpd, STD_VPD)
-            open_netcdf(opts.out_rs, "a", opts) do nc_out_rs
-                idx_rs_out = validate_variable_from_std_name(nc_out_rs, STD_RS)
-                open_netcdf(opts.out_pr, "a", opts) do nc_out_pr
-                    idx_pr_out = validate_variable_from_std_name(nc_out_pr,
-                                                                 STD_PR)
-                    open_netcdf(opts.out_ps, "a", opts) do nc_out_ps
-                        idx_ps_out = validate_variable_from_std_name(nc_out_ps,
-                                                                     STD_PS)
-                        idx_out = OutputDimensionOrders(
-                            idx_rs_out, idx_pr_out, idx_temp, idx_vpd,
-                            idx_ps_out)
-                        generate_weather(opts, idx_in, idx_out)
-                    end
-                end
-            end
-        end
+        idx_vpd = validate_variable_from_std_name(nc_out_vpd, STD_VPD)
+        idx_rs_out = validate_variable_from_std_name(nc_out_rs, STD_RS)
+        idx_pr_out = validate_variable_from_std_name(nc_out_pr, STD_PR)
+        idx_ps_out = validate_variable_from_std_name(nc_out_ps, STD_PS)
+
+        idx_out = OutputDimensionOrders(idx_rs_out, idx_pr_out, idx_temp,
+                                        idx_vpd, idx_ps_out)
+
+        generate_weather(opts, idx_in, idx_out)
+    end
+end
+
+function make_mpi_logger(level::Logging.LogLevel, rank::Int)
+    return ConsoleLogger(stdout, level; meta_formatter = (lvl, _module, group, id, file, line) -> begin
+        color, prefix, suffix = Logging.default_metafmt(lvl, _module, group, id, file, line)
+        return color, "[rank=$rank] $prefix", suffix
+    end)
+end
+
+function make_std_logger(level::Logging.LogLevel)
+    return ConsoleLogger(stdout, level)
+end
+
+function make_logger(opts::Options)
+    if opts.parallel
+        return make_mpi_logger(opts.log_level, get_rank())
+    else
+        return make_std_logger(opts.log_level)
     end
 end
 
 function main(opts::Options)
     wg_init()
 
+    initialise_output_files(opts)
+    if opts.parallel
+        barrier("post-init")
+    end
+    @info "Output files initialised; starting weather generation"
+
     # Open input files for reading.
-    open_netcdf(opts.in_tmin, "r", opts) do tmin
-        open_netcdf(opts.in_tmax, "r", opts) do tmax
-            open_netcdf(opts.in_rs, "r", opts) do rs
-                open_netcdf(opts.in_pr, "r", opts) do pr
-                    open_netcdf(opts.in_ps, "r", opts) do ps
-                        process_data(opts, tmin, tmax, rs, pr, ps)
-                    end
-                end
-            end
-        end
+    with_open_netcdfs([opts.in_tmin, opts.in_tmax, opts.in_rs, opts.in_pr,
+                       opts.in_ps], "r", opts) do in_datasets
+        tmin = in_datasets[opts.in_tmin]
+        tmax = in_datasets[opts.in_tmax]
+        rs = in_datasets[opts.in_rs]
+        pr = in_datasets[opts.in_pr]
+        ps = in_datasets[opts.in_ps]
+
+        process_data(opts, tmin, tmax, rs, pr, ps)
     end
 end
 
 # Main CLI entrypoint function. Initialises logging and MPI, and runs the
 # generator. Does not swallow exceptions.
 function cli_main(opts::Options)
-    logger = ConsoleLogger(stdout, opts.log_level)
-    global_logger(logger)
-
     if opts.parallel
         @eval using MPI
         MPI.Init()
+    end
+
+    # Logging initialisation must happen after MPI, because in parallel mode,
+    # the logger needs to know the MPI rank to include in log messages.
+    logger = make_logger(opts)
+    global_logger(logger)
+
+    # Can't emit this warning until after logging has been initialised.
+    if opts.parallel
+        @info "Running in MPI mode. World size is $(get_world_size()), rank is $(get_rank())"
         if get_world_size() == 1
             @warn "MPI parallelism enabled but only one process detected; running in serial. This is almost certainly not what you want. To fix, run with multiple processes (e.g. using mpirun)."
         end
-
-        @info "Running on rank $(get_rank()) of $(get_world_size())"
     end
 
     try
@@ -1183,6 +1356,6 @@ end
 end # module
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    opts = parse_cli()
-    cli_main(opts)
+    opts = Weathergen.parse_cli()
+    Weathergen.cli_main(opts)
 end
