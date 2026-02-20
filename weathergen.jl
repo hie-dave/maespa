@@ -21,6 +21,7 @@ using NCDatasets
 using Dates
 using DataStructures
 using MPI
+using Printf
 
 ################################################################################
 # Includes
@@ -981,6 +982,13 @@ function get_max_workload_size(opts::Options,
     return cld(ncells, get_world_size())
 end
 
+function format_hms(total_seconds::Integer)::String
+    h = total_seconds ÷ 3600
+    m = (total_seconds % 3600) ÷ 60
+    s = total_seconds % 60
+    return @sprintf("%02d:%02d:%02d", h, m, s)
+end
+
 function generate_weather(opts::Options, indices_in::InputDimensionOrders,
                           indices_out::OutputDimensionOrders)
     # Iterate through gridcells. (All input files use the same grid.)
@@ -1124,11 +1132,8 @@ function generate_weather(opts::Options, indices_in::InputDimensionOrders,
             total = elapsed / progress
             remaining = total - elapsed
 
-            elapsed_s = Dates.Time(Dates.Second(round(elapsed)))
-            remaining_s = Dates.Time(Dates.Second(round(remaining)))
-
-            elapsed_hhmmss = Dates.format(elapsed_s, "HH:MM:SS")
-            remaining_hhmmss = Dates.format(remaining_s, "HH:MM:SS")
+            elapsed_hhmmss = format_hms(Int(round(elapsed)))
+            remaining_hhmmss = format_hms(Int(round(remaining)))
             @info "Progress: $(round(percent, digits=2))% (Elapsed: $elapsed_hhmmss, Remaining: $remaining_hhmmss)"
         end
     end # iteration through assigned gridcells
