@@ -1134,7 +1134,8 @@ function generate_weather(opts::Options, indices_in::InputDimensionOrders,
 
             elapsed_hhmmss = format_hms(Int(round(elapsed)))
             remaining_hhmmss = format_hms(Int(round(remaining)))
-            @info "Progress: $(round(percent, digits=2))% (Elapsed: $elapsed_hhmmss, Remaining: $remaining_hhmmss)"
+            msg = "Progress: $(round(percent, digits=2))% (Elapsed: $elapsed_hhmmss, Remaining: $remaining_hhmmss)"
+            println(msg)
         end
     end # iteration through assigned gridcells
 
