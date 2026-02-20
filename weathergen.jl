@@ -374,6 +374,11 @@ function parse_cli()::Options
         ]
         if file_ps !== nothing
             push!(paths, PerVariablePaths(file_ps, out_ps, "--file-ps", "--out-ps"))
+        else
+            # FIXME: this is not ideal.
+            # Dummy path to get past validation. This won't contain ps data,
+            # so constant air pressure will be used instead.
+            file_ps = file_tmin
         end
         validate_per_variable_paths(paths)
     end
