@@ -715,19 +715,19 @@ function read(indices::DimensionIndices, i::Int, j::Int, units::String, dt::Int,
     return convert_units(data, indices.var.attrib[ATTR_UNITS], units, dt)
 end
 
-"""Convert a `DateTime` to Maespa's `idate` (days since 1950-01-01).
+"""Convert a date-like value to Maespa's `idate` (days since 1950-01-01).
 
 This matches the Fortran calendar math used by Maespa (Julian-style leap
 years: every 4 years, with no century exception), so `JDATE(idate)` returns
 the correct day-of-year.
 """
-function date_to_idate(date::DateTime)
+function date_to_idate(date)
     # Note: can't use Dates.value() because the underlying fortran code uses a
     # Julian calendar, with leap days exactly every 4 years.
 
-    yearValue = year(date)
-    monthValue = month(date)
-    dayValue = day(date)
+    yearValue = Dates.year(date)
+    monthValue = Dates.month(date)
+    dayValue = Dates.day(date)
 
     ifd = (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
 
