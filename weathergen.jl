@@ -1123,7 +1123,13 @@ function generate_weather(opts::Options, indices_in::InputDimensionOrders,
             elapsed = time() - start_time
             total = elapsed / progress
             remaining = total - elapsed
-            @info "Progress: $(round(percent, digits=2))% (Elapsed: $(round(elapsed, digits=2))s, Remaining: $(round(remaining, digits=2))s)"
+
+            elapsed_s = Dates.Time(Dates.Second(round(elapsed)))
+            remaining_s = Dates.Time(Dates.Second(round(remaining)))
+
+            elapsed_hhmmss = Dates.format(elapsed_s, "HH:MM:SS")
+            remaining_hhmmss = Dates.format(remaining_s, "HH:MM:SS")
+            @info "Progress: $(round(percent, digits=2))% (Elapsed: $elapsed_hhmmss, Remaining: $remaining_hhmmss)"
         end
     end # iteration through assigned gridcells
 
