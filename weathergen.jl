@@ -152,6 +152,9 @@ struct Options
     default_ps::Float32
     parallel::Bool
     show_progress::Bool
+
+    # Minimum interval between progress updates, in seconds.
+    progress_interval::Int
 end
 
 # Struct to hold a variable along with the indices of its dimensions.
@@ -303,6 +306,10 @@ function parse_cli()::Options
         "--show-progress"
             action=:store_true
             help="Show overall progress during processing."
+        "--progress-interval"
+            arg_type=Int
+            default=5
+            help="Minimum interval between progress updates, in seconds."
     end
 
     parsed = parse_args(parser)
@@ -391,7 +398,8 @@ function parse_cli()::Options
                    log_level, parsed["compression-level"],
                    parsed["chunk-lon"], parsed["chunk-lat"],
                    parsed["chunk-time"], parsed["default-ps"],
-                   parsed["parallel"], parsed["show-progress"])
+                   parsed["parallel"], parsed["show-progress"],
+                   parsed["progress-interval"])
 end
 
 function validate_per_variable_paths(paths::Vector{PerVariablePaths})
@@ -1000,6 +1008,8 @@ function generate_weather(opts::Options, indices_in::InputDimensionOrders,
     lats = var_lat[:]
     times = var_time[:]
 
+    last_progress_time = time() - opts.progress_interval
+
     # Get timestep width in seconds.
     # TODO: more robust time delta handling.
     dt = Second(Dates.value(times[2] - times[1]) / 1000).value
@@ -1135,7 +1145,10 @@ function generate_weather(opts::Options, indices_in::InputDimensionOrders,
             elapsed_hhmmss = format_hms(Int(round(elapsed)))
             remaining_hhmmss = format_hms(Int(round(remaining)))
             msg = "Progress: $(round(percent, digits=2))% (Elapsed: $elapsed_hhmmss, Remaining: $remaining_hhmmss)"
-            println(msg)
+            if time() - last_progress_time >= opts.progress_interval
+                println(msg)
+                last_progress_time = time()
+            end
         end
     end # iteration through assigned gridcells
 
