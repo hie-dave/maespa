@@ -1236,7 +1236,7 @@ function open_netcdf(f::Function, path::AbstractString, mode::AbstractString,
     end
     nc = open()
     if opts.parallel
-        @info "Setting collective access mode for file $(NCDatasets.path(nc))"
+        @debug "Setting collective access mode for file $(NCDatasets.path(nc))"
         NCDatasets.paraccess(nc, :collective)
     end
 
