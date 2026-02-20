@@ -150,6 +150,7 @@ struct Options
     # air pressure.
     default_ps::Float32
     parallel::Bool
+    show_progress::Bool
 end
 
 # Struct to hold a variable along with the indices of its dimensions.
@@ -298,6 +299,9 @@ function parse_cli()::Options
         "--out-vpd"
             arg_type=String
             help="Path to hourly vapour pressure deficit output file (kPa). Mutually exclusive with --output-file."
+        "--show-progress"
+            action=:store_true
+            help="Show overall progress during processing."
     end
 
     parsed = parse_args(parser)
@@ -376,7 +380,7 @@ function parse_cli()::Options
                    log_level, parsed["compression-level"],
                    parsed["chunk-lon"], parsed["chunk-lat"],
                    parsed["chunk-time"], parsed["default-ps"],
-                   parsed["parallel"])
+                   parsed["parallel"], parsed["show-progress"])
 end
 
 function validate_per_variable_paths(paths::Vector{PerVariablePaths})
@@ -1001,6 +1005,9 @@ function generate_weather(opts::Options, indices_in::InputDimensionOrders,
         @info "Processing $workload_size gridcells"
     end
 
+    # Record start time for progress reporting.
+    start_time = time()
+
     # Iterate through gridcells. Generate climate one gridcell at a time.
     nlon = length(lons)
     ntime = length(times)
@@ -1096,6 +1103,18 @@ function generate_weather(opts::Options, indices_in::InputDimensionOrders,
         write(indices_out.idx_rs, rs_out, i, j)
         write(indices_out.idx_pr, pr_out, i, j)
         write(indices_out.idx_ps, ps_out, i, j)
+
+        # Write progress message after processing each gridcell.
+        # In MPI mode, effectively all IO is collective, so we can assume that
+        # all workers are making progress at the same rate.
+        if opts.show_progress && (!opts.parallel || get_rank() == 0)
+            progress = (cell - first(workitems) + 1) / workload_size
+            percent = progress * 100
+            elapsed = time() - start_time
+            total = elapsed / progress
+            remaining = total - elapsed
+            @info "Progress: $(round(percent, digits=2))% (Elapsed: $(round(elapsed, digits=2))s, Remaining: $(round(remaining, digits=2))s)"
+        end
     end # iteration through assigned gridcells
 
     if !opts.parallel
