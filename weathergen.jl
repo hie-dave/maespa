@@ -356,7 +356,9 @@ function parse_cli()::Options
         validate_file_path(file_tmax, "--file-tmax")
         validate_file_path(file_rs, "--file-rs")
         validate_file_path(file_pr, "--file-pr")
-        validate_file_path(file_ps, "--file-ps")
+        if file_ps !== nothing
+            validate_file_path(file_ps, "--file-ps")
+        end
 
         ensure_set(out_temp, "--out-temp")
         ensure_set(out_pr, "--out-pr")
@@ -364,13 +366,16 @@ function parse_cli()::Options
         ensure_set(out_rs, "--out-rs")
         ensure_set(out_vpd, "--out-vpd")
 
-        validate_per_variable_paths([
+        paths = [
             PerVariablePaths(file_tmin, out_temp, "--file-tmin", "--out-temp"),
             PerVariablePaths(file_tmax, out_temp, "--file-tmax", "--out-temp"),
             PerVariablePaths(file_rs, out_rs, "--file-rs", "--out-rs"),
-            PerVariablePaths(file_pr, out_pr, "--file-pr", "--out-pr"),
-            PerVariablePaths(file_ps, out_ps, "--file-ps", "--out-ps"),
-        ])
+            PerVariablePaths(file_pr, out_pr, "--file-pr", "--out-pr")
+        ]
+        if file_ps !== nothing
+            push!(paths, PerVariablePaths(file_ps, out_ps, "--file-ps", "--out-ps"))
+        end
+        validate_per_variable_paths(paths)
     end
 
     return Options(parsed["seed"], file_tmin, file_tmax, file_rs, file_pr,
