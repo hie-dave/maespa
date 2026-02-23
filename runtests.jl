@@ -85,33 +85,76 @@ function write_synthetic_daily_input(path::AbstractString)
     return (times = times, lons = lons, lats = lats)
 end
 
-function run_weathergen(input_path::AbstractString, output_path::AbstractString)
-    seed = 123
-    opts = Weathergen.Options(
-        seed,          # seed::Int
-        input_path,    # in_tmin::String
-        input_path,    # in_tmax::String
-        input_path,    # in_rs::String
-        input_path,    # in_pr::String
-        input_path,    # in_ps::String
-        output_path,   # out_temp::String
-        output_path,   # out_pr::String
-        output_path,   # out_ps::String
-        output_path,   # out_rs::String
-        output_path,   # out_vpd::String
-        "tasmax",      # name_tmax::String
-        "tasmin",      # name_tmin::String
-        "tas",         # out_name_temp::String
-        "vpd",         # out_name_vpd::String
-        Logging.Error, # log_level::Logging.LogLevel
-        5,             # compression_level::Int
-        1,             # chunk_size_lon::Int
-        1,             # chunk_size_lat::Int
-        24,            # chunk_size_time::Int
-        101300,        # default_ps::Float32
-        false,         # parallel::Bool
+function mkopts(inpath::AbstractString, outpath::AbstractString; seed::Int=123,
+                name_tmax::String="tasmax", name_tmin::String="tasmin",
+                out_name_temp::String="tas", out_name_vpd::String="vpd",
+                log_level::Logging.LogLevel=Logging.Error,
+                compression_level::Int=5,
+                chunk_size_lon::Int=1, chunk_size_lat::Int=1, chunk_size_time::Int=24,
+                default_ps::Float32=101300f0, parallel::Bool=false)
+    return Weathergen.Options(
+        seed,
+        inpath, inpath, inpath, inpath, inpath,
+        outpath, outpath, outpath, outpath, outpath,
+        name_tmax, name_tmin, out_name_temp, out_name_vpd,
+        log_level, compression_level,
+        chunk_size_lon, chunk_size_lat, chunk_size_time,
+        default_ps, parallel,
     )
+end
+
+function run_weathergen(opts::Weathergen.Options)
     Weathergen.cli_main(opts)
+end
+
+function log_level_to_verbosity(level::Logging.LogLevel)
+    if level === Logging.Error
+        return 0
+    elseif level === Logging.Warn
+        return 1
+    elseif level === Logging.Info
+        return 2
+    elseif level === Logging.Debug
+        return 3
+    else
+        return 2
+    end
+end
+
+# Run the weather generator via the CLI in a subprocess, passing options as
+# command-line arguments. This will use mpiexecjl for parallel execution if
+# opts.parallel is true, using the specified number of processors. If parallel
+# is false, nprocs will be ignored.
+#
+# Per-variable file paths are ignored. in_tmin and out_temp are used as the
+# input and output file paths.
+#
+# This is very inefficient. Don't use this for serial execution.
+function run_weathergen_cli(opts::Weathergen.Options; nprocs::Int=2)
+    # Map Logging level back to verbosity integer used by the CLI parser.
+    verbosity = log_level_to_verbosity(opts.log_level)
+
+    args = ["julia", "--project=@.", "weathergen.jl"]
+    push!(args, "-s"); push!(args, string(opts.seed))
+    push!(args, "--chunk-lon"); push!(args, string(opts.chunk_size_lon))
+    push!(args, "--chunk-lat"); push!(args, string(opts.chunk_size_lat))
+    push!(args, "--chunk-time"); push!(args, string(opts.chunk_size_time))
+    push!(args, "--verbosity"); push!(args, string(verbosity))
+    push!(args, "--default-ps"); push!(args, string(opts.default_ps))
+    if opts.parallel
+        push!(args, "--parallel")
+    end
+
+    # Assume single-file mode: provide input-file and output-file
+    push!(args, "-i"); push!(args, opts.in_tmin)
+    push!(args, "-o"); push!(args, opts.out_temp)
+
+    if opts.parallel
+        args = vcat(["mpiexecjl", "-n", string(nprocs)], args)
+    end
+
+    # Build command string and run via shell to avoid splicing issues
+    run(`sh -c $(join(args, " "))`)
 end
 
 function read_output(path::AbstractString)
@@ -135,7 +178,9 @@ end
         output_path = joinpath(tmp, "output_hourly.nc")
         input = write_synthetic_daily_input(input_path)
 
-        run_weathergen(input_path, output_path)
+        # Run serial generation via the API (same as existing tests)
+        opts = mkopts(input_path, output_path)
+        run_weathergen(opts)
         out = read_output(output_path)
 
         expected_time = length(input.times) * 24
@@ -189,5 +234,81 @@ end
         @test out.pr[1:12] ≈ Float32[
             0, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0, 0,
         ] atol=1f-6
+    end
+end
+
+@testset "weathergen parallel parity" begin
+    mktempdir() do tmp
+        input_path = joinpath(tmp, "input_daily.nc")
+        out_serial = joinpath(tmp, "output_serial.nc")
+        out_parallel = joinpath(tmp, "output_parallel.nc")
+        input = write_synthetic_daily_input(input_path)
+
+        # Run serial generation via the API (same as existing tests)
+        opts_serial = mkopts(input_path, out_serial)
+        run_weathergen(opts_serial)
+
+        # If mpiexecjl is not available, skip the parallel parity test.
+        if Sys.which("mpiexecjl") === nothing
+            @info "mpiexecjl not found; skipping parallel parity test"
+            return
+        end
+
+        # Run the CLI in parallel using mpiexecjl. Use 2 processes.
+        # Pass the same deterministic seed and small chunk sizes so NetCDF
+        # chunking is valid for the small test dataset.
+        opts_parallel = mkopts(input_path, out_parallel; parallel=true)
+        try
+            run_weathergen_cli(opts_parallel; nprocs=2)
+        catch err
+            @error "Parallel weathergen CLI failed" err
+            rethrow()
+        end
+
+        # Helper to open dataset and extract info for comparison.
+        function ds_summary(path)
+            NCDataset(path) do ds
+                vars = Dict{String,Any}()
+                for vn in ["tas", "vpd", "rsds", "pr", "ps"]
+                    if haskey(ds, vn)
+                        arr = Array(ds[vn][:])
+                        attrs = Dict{String,Any}(collect(ds[vn].attrib))
+                        vars[vn] = (data = arr, attrib = attrs, dims = size(ds[vn]))
+                    end
+                end
+
+                coords = Dict(
+                    "lat" => Array(ds["lat"][:]),
+                    "lon" => Array(ds["lon"][:]),
+                    "time" => Array(ds["time"][:]),
+                )
+
+                global_attribs = Dict{String,Any}(collect(ds.attrib))
+
+                return (vars = vars, coords = coords, global_attribs = global_attribs)
+            end
+        end
+
+        s = ds_summary(out_serial)
+        p = ds_summary(out_parallel)
+
+        # Compare coordinates
+        @test keys(s.coords) == keys(p.coords)
+        for k in keys(s.coords)
+            @test s.coords[k] == p.coords[k]
+        end
+
+        # Compare global attributes
+        @test s.global_attribs == p.global_attribs
+
+        # Compare variables: existence, attributes, dimensions and data
+        @test keys(s.vars) == keys(p.vars)
+        for vn in keys(s.vars)
+            sv = s.vars[vn]
+            pv = p.vars[vn]
+            @test sv.dims == pv.dims
+            @test sv.attrib == pv.attrib
+            @test sv.data == pv.data
+        end
     end
 end

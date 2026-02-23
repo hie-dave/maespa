@@ -21,6 +21,7 @@ using NCDatasets
 using Dates
 using DataStructures
 using MPI
+using Printf
 
 ################################################################################
 # Includes
@@ -150,6 +151,10 @@ struct Options
     # air pressure.
     default_ps::Float32
     parallel::Bool
+    show_progress::Bool
+
+    # Minimum interval between progress updates, in seconds.
+    progress_interval::Int
 end
 
 # Struct to hold a variable along with the indices of its dimensions.
@@ -298,6 +303,13 @@ function parse_cli()::Options
         "--out-vpd"
             arg_type=String
             help="Path to hourly vapour pressure deficit output file (kPa). Mutually exclusive with --output-file."
+        "--show-progress"
+            action=:store_true
+            help="Show overall progress during processing."
+        "--progress-interval"
+            arg_type=Int
+            default=5
+            help="Minimum interval between progress updates, in seconds."
     end
 
     parsed = parse_args(parser)
@@ -352,7 +364,9 @@ function parse_cli()::Options
         validate_file_path(file_tmax, "--file-tmax")
         validate_file_path(file_rs, "--file-rs")
         validate_file_path(file_pr, "--file-pr")
-        validate_file_path(file_ps, "--file-ps")
+        if file_ps !== nothing
+            validate_file_path(file_ps, "--file-ps")
+        end
 
         ensure_set(out_temp, "--out-temp")
         ensure_set(out_pr, "--out-pr")
@@ -360,13 +374,21 @@ function parse_cli()::Options
         ensure_set(out_rs, "--out-rs")
         ensure_set(out_vpd, "--out-vpd")
 
-        validate_per_variable_paths([
+        paths = [
             PerVariablePaths(file_tmin, out_temp, "--file-tmin", "--out-temp"),
             PerVariablePaths(file_tmax, out_temp, "--file-tmax", "--out-temp"),
             PerVariablePaths(file_rs, out_rs, "--file-rs", "--out-rs"),
-            PerVariablePaths(file_pr, out_pr, "--file-pr", "--out-pr"),
-            PerVariablePaths(file_ps, out_ps, "--file-ps", "--out-ps"),
-        ])
+            PerVariablePaths(file_pr, out_pr, "--file-pr", "--out-pr")
+        ]
+        if file_ps !== nothing
+            push!(paths, PerVariablePaths(file_ps, out_ps, "--file-ps", "--out-ps"))
+        else
+            # FIXME: this is not ideal.
+            # Dummy path to get past validation. This won't contain ps data,
+            # so constant air pressure will be used instead.
+            file_ps = file_tmin
+        end
+        validate_per_variable_paths(paths)
     end
 
     return Options(parsed["seed"], file_tmin, file_tmax, file_rs, file_pr,
@@ -376,7 +398,8 @@ function parse_cli()::Options
                    log_level, parsed["compression-level"],
                    parsed["chunk-lon"], parsed["chunk-lat"],
                    parsed["chunk-time"], parsed["default-ps"],
-                   parsed["parallel"])
+                   parsed["parallel"], parsed["show-progress"],
+                   parsed["progress-interval"])
 end
 
 function validate_per_variable_paths(paths::Vector{PerVariablePaths})
@@ -706,19 +729,19 @@ function read(indices::DimensionIndices, i::Int, j::Int, units::String, dt::Int,
     return convert_units(data, indices.var.attrib[ATTR_UNITS], units, dt)
 end
 
-"""Convert a `DateTime` to Maespa's `idate` (days since 1950-01-01).
+"""Convert a date-like value to Maespa's `idate` (days since 1950-01-01).
 
 This matches the Fortran calendar math used by Maespa (Julian-style leap
 years: every 4 years, with no century exception), so `JDATE(idate)` returns
 the correct day-of-year.
 """
-function date_to_idate(date::DateTime)
+function date_to_idate(date)
     # Note: can't use Dates.value() because the underlying fortran code uses a
     # Julian calendar, with leap days exactly every 4 years.
 
-    yearValue = year(date)
-    monthValue = month(date)
-    dayValue = day(date)
+    yearValue = Dates.year(date)
+    monthValue = Dates.month(date)
+    dayValue = Dates.day(date)
 
     ifd = (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
 
@@ -967,6 +990,13 @@ function get_max_workload_size(opts::Options,
     return cld(ncells, get_world_size())
 end
 
+function format_hms(total_seconds::Integer)::String
+    h = total_seconds ÷ 3600
+    m = (total_seconds % 3600) ÷ 60
+    s = total_seconds % 60
+    return @sprintf("%02d:%02d:%02d", h, m, s)
+end
+
 function generate_weather(opts::Options, indices_in::InputDimensionOrders,
                           indices_out::OutputDimensionOrders)
     # Iterate through gridcells. (All input files use the same grid.)
@@ -977,6 +1007,8 @@ function generate_weather(opts::Options, indices_in::InputDimensionOrders,
     lons = var_lon[:]
     lats = var_lat[:]
     times = var_time[:]
+
+    last_progress_time = time() - opts.progress_interval
 
     # Get timestep width in seconds.
     # TODO: more robust time delta handling.
@@ -1000,6 +1032,9 @@ function generate_weather(opts::Options, indices_in::InputDimensionOrders,
     else
         @info "Processing $workload_size gridcells"
     end
+
+    # Record start time for progress reporting.
+    start_time = time()
 
     # Iterate through gridcells. Generate climate one gridcell at a time.
     nlon = length(lons)
@@ -1096,6 +1131,25 @@ function generate_weather(opts::Options, indices_in::InputDimensionOrders,
         write(indices_out.idx_rs, rs_out, i, j)
         write(indices_out.idx_pr, pr_out, i, j)
         write(indices_out.idx_ps, ps_out, i, j)
+
+        # Write progress message after processing each gridcell.
+        # In MPI mode, effectively all IO is collective, so we can assume that
+        # all workers are making progress at the same rate.
+        if opts.show_progress && (!opts.parallel || get_rank() == 0)
+            progress = (cell - first(workitems) + 1) / workload_size
+            percent = progress * 100
+            elapsed = time() - start_time
+            total = elapsed / progress
+            remaining = total - elapsed
+
+            elapsed_hhmmss = format_hms(Int(round(elapsed)))
+            remaining_hhmmss = format_hms(Int(round(remaining)))
+            msg = "Progress: $(round(percent, digits=2))% (Elapsed: $elapsed_hhmmss, Remaining: $remaining_hhmmss)"
+            if time() - last_progress_time >= opts.progress_interval
+                println(msg)
+                last_progress_time = time()
+            end
+        end
     end # iteration through assigned gridcells
 
     if !opts.parallel
@@ -1201,7 +1255,7 @@ function open_netcdf(f::Function, path::AbstractString, mode::AbstractString,
     end
     nc = open()
     if opts.parallel
-        @info "Setting collective access mode for file $(NCDatasets.path(nc))"
+        @debug "Setting collective access mode for file $(NCDatasets.path(nc))"
         NCDatasets.paraccess(nc, :collective)
     end
 
