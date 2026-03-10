@@ -57,7 +57,7 @@ const STD_RS = "surface_downwelling_shortwave_flux_in_air"
 const STD_PR = "precipitation_amount"
 
 # Standard name of air pressure (as per CF spec).
-const STD_PS = "air_pressure"
+const STD_PS = "surface_air_pressure"
 
 # Number of timesteps per day.
 const DAY_LENGTH = 24
@@ -97,7 +97,7 @@ const UNITS_PR = "mm"
 const DEFAULT_PS = 101300
 
 # Standard name of VPD (as per CF spec).
-const STD_VPD = "vapour_pressure_deficit"
+const STD_VPD = "water_vapor_saturation_deficit"
 
 # Long name of VPD (as per CF spec).
 const LONG_VPD = "Vapour pressure deficit"
