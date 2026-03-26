@@ -878,7 +878,9 @@ function create_outfile(nc_in::NCDataset, nc_out::NCDataset, opts::Options)
     # Construct hourly timeseries from each day in the input time
     # variable.
     times = in_time[:]
-    hours = [t + Hour(h) for t in times for h in 0:(DAY_LENGTH - 1)]
+    # Get timestep width in hours.
+    timestep_width = 24 / DAY_LENGTH
+    hours = [DateTime(Date(t)) + Hour(h * timestep_width) for t in times for h in 0:(DAY_LENGTH - 1)]
 
     # Not writing a fill value attribute for time, since there should be no
     # missing values.
