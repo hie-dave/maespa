@@ -172,6 +172,33 @@ function read_output(path::AbstractString)
     end
 end
 
+@testset "calendar-preserving hourly timestamps" begin
+    calendar_types = (
+        NCDatasets.CFTime.DateTimeStandard,
+        NCDatasets.CFTime.DateTimeJulian,
+        NCDatasets.CFTime.DateTimeProlepticGregorian,
+        NCDatasets.CFTime.DateTimeAllLeap,
+        NCDatasets.CFTime.DateTimeNoLeap,
+        NCDatasets.CFTime.DateTime360Day,
+    )
+
+    for T in calendar_types
+        daily_time = T(2016, 2, 28, 12)
+        midnight = Weathergen.start_of_day(daily_time)
+        hourly_times = [midnight + Hour(h) for h in 0:23]
+
+        @test typeof(midnight) == typeof(daily_time)
+        @test (year(midnight), month(midnight), day(midnight)) == (2016, 2, 28)
+        @test (hour(first(hourly_times)), hour(last(hourly_times))) == (0, 23)
+        @test all(typeof(t) == typeof(daily_time) for t in hourly_times)
+    end
+
+    daily_time = DateTime(2016, 2, 28, 12)
+    midnight = Weathergen.start_of_day(daily_time)
+    @test midnight == DateTime(2016, 2, 28)
+    @test typeof(midnight) == typeof(daily_time)
+end
+
 @testset "weathergen integration" begin
     mktempdir() do tmp
         input_path = joinpath(tmp, "input_daily.nc")
